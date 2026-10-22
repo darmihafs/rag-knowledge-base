@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.dev.log
+.idea/
+.vscode/
+# nginx.conf 要进上下文（Dockerfile 会 COPY），不要排除

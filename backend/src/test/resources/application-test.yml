@@ -1,0 +1,46 @@
+# 测试专用配置：H2 内存库 + 本地临时上传目录，完全不接触开发库 kb_rag
+spring:
+  datasource:
+    driver-class-name: org.h2.Driver
+    url: jdbc:h2:mem:kb_smoke;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    username: sa
+    password: ""
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema-h2.sql
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+rag:
+  api-key: ""
+  embedding-enabled: false
+  # 测试用小分块，便于用几百字文本切出多段
+  chunk-max-chars: 300
+  chunk-overlap-chars: 50
+  top-k: 3
+  upload-dir: ./target/test-uploads
+  # 向量库落到 target，避免测试读写开发用的 ./data；启用向量用例前会先 removeAll 清空
+  embedding-store-path: ./target/test-embedding-store.json
+  # H2 没有 MATCH ... AGAINST 与 ngram 解析器，测试与评测跑批一律走 LIKE 兜底分支
+  lexical-mode: like
+
+# 认证：测试环境放行「无 token」请求并注入管理员身份，让第七阶段之前写下的旧集成测试保持全绿。
+# 新增的 AuthIntegrationTest 会显式带 token（或用 auth.test-bypass=false 的独立上下文）来验证 401/403/隔离。
+auth:
+  secret: kb-rag-test-jwt-secret-0123456789-abcdefghijklmnopqrstuvwxyz
+  expire-minutes: 720
+  test-bypass: true
+
+logging:
+  level:
+    com.bishe.kb: info

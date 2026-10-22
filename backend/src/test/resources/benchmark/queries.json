@@ -1,0 +1,650 @@
+{
+  "name": "三类标注问题集",
+  "description": "A 类=字面精确匹配（专有名词/参数名/数字，考察词法检索）；B 类=同义或近义改写（与原文几乎无字面 2-gram 重叠，考察语义检索）；C 类=综合复杂提问（既有术语又有语义泛化）。evidence 是目标切片里的一段原文，判命中时以召回切片是否包含它为准，这样切片粒度变化后标准答案仍然有效。扩容后共 92 题覆盖 80 段切片，每题的 evidence 在全语料中唯一，避免别的切片意外判成命中。",
+  "queries": [
+    {
+      "id": "A1",
+      "category": "A",
+      "question": "RRF 倒数排名融合里的常数 k 默认取多少？",
+      "targetSection": "SYS-02",
+      "evidence": "k 默认 60"
+    },
+    {
+      "id": "A2",
+      "category": "A",
+      "question": "TIME_WAIT 状态为什么要持续两个 MSL 才释放？",
+      "targetSection": "NET-05",
+      "evidence": "TIME_WAIT"
+    },
+    {
+      "id": "A3",
+      "category": "A",
+      "question": "B+ 树的叶子节点之间是用什么结构串起来的？",
+      "targetSection": "DB-01",
+      "evidence": "双向链表"
+    },
+    {
+      "id": "A4",
+      "category": "A",
+      "question": "进程和线程分别被称为哪个意义上的最小单位？",
+      "targetSection": "OS-01",
+      "evidence": "资源分配的最小单位"
+    },
+    {
+      "id": "A5",
+      "category": "A",
+      "question": "强缓存的有效期由哪个响应头字段控制？",
+      "targetSection": "NET-04",
+      "evidence": "强缓存看响应头"
+    },
+    {
+      "id": "A6",
+      "category": "A",
+      "question": "可重复读隔离级别下 ReadView 是什么时候建立的？",
+      "targetSection": "DB-04",
+      "evidence": "ReadView"
+    },
+    {
+      "id": "A7",
+      "category": "A",
+      "question": "后端签发的 JWT 默认有效期是多少分钟？",
+      "targetSection": "SYS-03",
+      "evidence": "720 分钟"
+    },
+    {
+      "id": "A8",
+      "category": "A",
+      "question": "慢启动阈值 ssthresh 在拥塞控制里起什么作用？",
+      "targetSection": "NET-02",
+      "evidence": "ssthresh"
+    },
+    {
+      "id": "A9",
+      "category": "A",
+      "question": "联合索引 (a,b,c) 遇到 WHERE a=1 AND c=3 能用上几列？",
+      "targetSection": "DB-02",
+      "evidence": "只能用 a 一段"
+    },
+    {
+      "id": "A10",
+      "category": "A",
+      "question": "虚拟内存里一个页的大小通常是多少 KB？",
+      "targetSection": "OS-02",
+      "evidence": "4 KB"
+    },
+    {
+      "id": "B1",
+      "category": "B",
+      "question": "对面机器一时处理不过来，怎么让发数据的那一侧先停一停，别把接收端拖垮？",
+      "targetSection": "NET-01",
+      "evidence": "持久定时器"
+    },
+    {
+      "id": "B2",
+      "category": "B",
+      "question": "实际摆放得七零八落，程序为什么感觉自己在一整块连贯的存放区里干活？",
+      "targetSection": "OS-02",
+      "evidence": "缺页中断"
+    },
+    {
+      "id": "B3",
+      "category": "B",
+      "question": "两件事各攥着对方要的半份东西，谁都不肯先松手，整个系统就此卡住，怎么破？",
+      "targetSection": "OS-04",
+      "evidence": "循环等待"
+    },
+    {
+      "id": "B4",
+      "category": "B",
+      "question": "同一段范围里别人新塞进来的行，被我前后两次读成了两条，靠什么机制挡住？",
+      "targetSection": "DB-03",
+      "evidence": "间隙锁"
+    },
+    {
+      "id": "B5",
+      "category": "B",
+      "question": "跨网络找路用一套编号，同一个链路里找人又用另一套编号，为什么非得分开？",
+      "targetSection": "NET-03",
+      "evidence": "默认网关"
+    },
+    {
+      "id": "B6",
+      "category": "B",
+      "question": "为什么这类树结构特别适合把一段连续区间顺次扫出来，中间那几层又只放路标不放东西？",
+      "targetSection": "DB-01",
+      "evidence": "非叶子节点"
+    },
+    {
+      "id": "B7",
+      "category": "B",
+      "question": "浏览器里存的那份东西过了时限，还要不要整个重新下一遍，靠什么判定？",
+      "targetSection": "NET-04",
+      "evidence": "304"
+    },
+    {
+      "id": "B8",
+      "category": "B",
+      "question": "内存装不下了要腾一页出去，挑哪一页赶走才不亏，可精确记账又太贵，怎么办？",
+      "targetSection": "OS-03",
+      "evidence": "时钟算法"
+    },
+    {
+      "id": "B9",
+      "category": "B",
+      "question": "服务器重启后不用把那些数字串从头算一遍，是怎么保住已有成果的？",
+      "targetSection": "SYS-02",
+      "evidence": "序列化成 JSON"
+    },
+    {
+      "id": "B10",
+      "category": "B",
+      "question": "读的人不必排队等锁，各看各的那一份数据，背后靠的是什么办法？",
+      "targetSection": "DB-04",
+      "evidence": "版本链"
+    },
+    {
+      "id": "C1",
+      "category": "C",
+      "question": "在十万级长连接的网关服务里，为什么普遍改用 epoll 而不是继续用 select？",
+      "targetSection": "OS-05",
+      "evidence": "十万级长连接"
+    },
+    {
+      "id": "C2",
+      "category": "C",
+      "question": "线上有条 SQL 越跑越慢，我该用什么命令看执行计划，Extra 里出现哪个词就该怀疑排序没走索引？",
+      "targetSection": "DB-05",
+      "evidence": "Using filesort"
+    },
+    {
+      "id": "C3",
+      "category": "C",
+      "question": "分块时的 800 和 120 这两个数字是什么关系？为什么后者不能直接设成 0？",
+      "targetSection": "SYS-01",
+      "evidence": "块边界"
+    },
+    {
+      "id": "C4",
+      "category": "C",
+      "question": "点一下引用角标就能跳到 PDF 里对应那一页，这个页码是怎么一路传下来的？存在哪个字段里？",
+      "targetSection": "SYS-05",
+      "evidence": "page_number"
+    },
+    {
+      "id": "C5",
+      "category": "C",
+      "question": "在管理页把一条质量差的切片停用之后，它为什么再也不会出现在回答的参考资料里？",
+      "targetSection": "SYS-02",
+      "evidence": "人工禁用"
+    },
+    {
+      "id": "C6",
+      "category": "C",
+      "question": "普通学生账号能不能删别人的文档？系统是根据什么把这类请求挡下来的？",
+      "targetSection": "SYS-03",
+      "evidence": "只允许 ADMIN"
+    },
+    {
+      "id": "C7",
+      "category": "C",
+      "question": "我换台电脑登录同一个账号，之前的对话还在；同学登录却看不到我的，这是怎么做到的？",
+      "targetSection": "SYS-04",
+      "evidence": "user_id"
+    },
+    {
+      "id": "C8",
+      "category": "C",
+      "question": "握手为什么非要凑满三次，客户端最后那一下不发会有什么后果？",
+      "targetSection": "NET-05",
+      "evidence": "半开连接"
+    },
+    {
+      "id": "C9",
+      "category": "C",
+      "question": "链路本身撑不住开始丢包时，发送方收缩窗口的节奏跟对端缓冲区满了的时候有什么不同？",
+      "targetSection": "NET-02",
+      "evidence": "拥塞避免"
+    },
+    {
+      "id": "C10",
+      "category": "C",
+      "question": "为什么每次追问只带最近几轮对话进 Prompt，而不是把整个会话历史全部塞给模型？",
+      "targetSection": "SYS-04",
+      "evidence": "1200 字"
+    },
+    {
+      "id": "A11",
+      "category": "A",
+      "question": "HTTPS 握手里的前向保密是怎么做到的？",
+      "targetSection": "NET-07",
+      "evidence": "这叫前向保密"
+    },
+    {
+      "id": "A12",
+      "category": "A",
+      "question": "redo log 和 binlog 之间为什么要做两阶段提交？",
+      "targetSection": "DB-06",
+      "evidence": "redo 先置为准备状态"
+    },
+    {
+      "id": "A13",
+      "category": "A",
+      "question": "HashMap 链表转红黑树的阈值 8 是依据什么分布算出来的？",
+      "targetSection": "JVM-09",
+      "evidence": "泊松分布"
+    },
+    {
+      "id": "A14",
+      "category": "A",
+      "question": "线程池用无界队列时最大线程数为什么会失效？",
+      "targetSection": "JVM-08",
+      "evidence": "无界队列"
+    },
+    {
+      "id": "A15",
+      "category": "A",
+      "question": "令牌桶和漏桶分别适合哪类流量入口？",
+      "targetSection": "DIST-06",
+      "evidence": "令牌桶"
+    },
+    {
+      "id": "A16",
+      "category": "A",
+      "question": "一致性哈希为什么还要引入虚拟节点？",
+      "targetSection": "DIST-05",
+      "evidence": "虚拟节点"
+    },
+    {
+      "id": "A17",
+      "category": "A",
+      "question": "SQL 注入防御里预编译占位符起什么作用？",
+      "targetSection": "SEC-05",
+      "evidence": "预编译占位符"
+    },
+    {
+      "id": "A18",
+      "category": "A",
+      "question": "BCrypt 靠哪个可调参数把单次校验成本抬到几百毫秒？",
+      "targetSection": "SEC-02",
+      "evidence": "工作因子"
+    },
+    {
+      "id": "A19",
+      "category": "A",
+      "question": "按需引入为什么必须配合摇树才真正减小体积？",
+      "targetSection": "FE-04",
+      "evidence": "摇树"
+    },
+    {
+      "id": "A20",
+      "category": "A",
+      "question": "倒排索引的文档列表用什么编码把相邻号码压小？",
+      "targetSection": "ALG-03",
+      "evidence": "差分编码"
+    },
+    {
+      "id": "A21",
+      "category": "A",
+      "question": "词法召回的全文索引为什么必须用 ngram 解析器？",
+      "targetSection": "SYS-06",
+      "evidence": "ngram 解析器"
+    },
+    {
+      "id": "A22",
+      "category": "A",
+      "question": "文件流接口为什么要先判断响应的 MIME 类型？",
+      "targetSection": "SYS-07",
+      "evidence": "MIME 类型"
+    },
+    {
+      "id": "A23",
+      "category": "A",
+      "question": "G1 是在什么约束下挑选每轮回收哪些区域的？",
+      "targetSection": "JVM-03",
+      "evidence": "停顿目标"
+    },
+    {
+      "id": "A24",
+      "category": "A",
+      "question": "读写分离下怎么强制这次查询走主库？",
+      "targetSection": "DB-10",
+      "evidence": "强制走主库"
+    },
+    {
+      "id": "A25",
+      "category": "A",
+      "question": "CFS 用哪个指标决定下一个被执行的任务？",
+      "targetSection": "OS-07",
+      "evidence": "虚拟运行时间"
+    },
+    {
+      "id": "A26",
+      "category": "A",
+      "question": "按分数加权融合两路结果为什么难调参？",
+      "targetSection": "RAG-02",
+      "evidence": "词法侧的分数是命中词数"
+    },
+    {
+      "id": "A27",
+      "category": "A",
+      "question": "前端渲染 Markdown 时清洗该用白名单还是黑名单？",
+      "targetSection": "FE-05",
+      "evidence": "白名单而不是黑名单"
+    },
+    {
+      "id": "A28",
+      "category": "A",
+      "question": "原文预览接口为什么没有启用更严格的沙箱策略？",
+      "targetSection": "SYS-08",
+      "evidence": "沙箱会让页码定位失效"
+    },
+    {
+      "id": "B11",
+      "category": "B",
+      "question": "内容搬到离用户更近的机器上之后，怎么避免同一份东西被大批请求同时打回源头？",
+      "targetSection": "NET-10",
+      "evidence": "回源合并"
+    },
+    {
+      "id": "B12",
+      "category": "B",
+      "question": "为什么记录改动要攒成连着一段段往外写，而不是这里补一点那里补一点？",
+      "targetSection": "OS-08",
+      "evidence": "顺序写只付带宽成本"
+    },
+    {
+      "id": "B13",
+      "category": "B",
+      "question": "改了文件的名字，为什么已经打开着这份文件的那段程序完全不受影响？",
+      "targetSection": "OS-09",
+      "evidence": "路径就是一段段查目录"
+    },
+    {
+      "id": "B14",
+      "category": "B",
+      "question": "条件稍微换个写法，本来建好的顺序结构就用不上了，函数包裹和类型对不上算哪一类原因？",
+      "targetSection": "DB-07",
+      "evidence": "隐式类型转换"
+    },
+    {
+      "id": "B15",
+      "category": "B",
+      "question": "把一张大表拆成许多小份之后，最难办的偏偏是按时间段整体捞一遍，问题出在哪一步决策上？",
+      "targetSection": "DB-08",
+      "evidence": "水平拆分要先选路由键"
+    },
+    {
+      "id": "B16",
+      "category": "B",
+      "question": "几个对象互相牵着对方的手，为什么照样能被判定成可以丢弃？",
+      "targetSection": "JVM-02",
+      "evidence": "循环引用"
+    },
+    {
+      "id": "B17",
+      "category": "B",
+      "question": "给字段加了那个修饰符之后，两个人同时做加减还是可能互相吃掉结果，为什么？",
+      "targetSection": "JVM-05",
+      "evidence": "不保证原子性"
+    },
+    {
+      "id": "B18",
+      "category": "B",
+      "question": "为什么不能反过来断定一个新起的对象一定存放在堆的那一块？",
+      "targetSection": "JVM-10",
+      "evidence": "逃逸分析"
+    },
+    {
+      "id": "B19",
+      "category": "B",
+      "question": "网络被切成两半之后，要么拒绝一部分请求，要么承认两边说法不一致，为什么躲不开？",
+      "targetSection": "DIST-01",
+      "evidence": "分区容忍"
+    },
+    {
+      "id": "B20",
+      "category": "B",
+      "question": "自己那把钥匙到期后被别人捡走了，收尾时却把别人的锁删掉，这种情况靠什么防住？",
+      "targetSection": "DIST-03",
+      "evidence": "比对持有标识再删除"
+    },
+    {
+      "id": "B21",
+      "category": "B",
+      "question": "去查一个数据库里根本没有的东西，每次都白跑一趟，有哪两种拦法？",
+      "targetSection": "DIST-07",
+      "evidence": "空值缓存"
+    },
+    {
+      "id": "B22",
+      "category": "B",
+      "question": "同样一段文字，出现在标签里面和出现在脚本的字符串里，为什么要分开对待？",
+      "targetSection": "SEC-03",
+      "evidence": "按上下文分别处理"
+    },
+    {
+      "id": "B23",
+      "category": "B",
+      "question": "把打分当成一条硬线来判断资料里有没有答案，为什么会误伤意思相近但说法不同的提问？",
+      "targetSection": "RAG-01",
+      "evidence": "分数量纲不可比"
+    },
+    {
+      "id": "B24",
+      "category": "B",
+      "question": "为什么不少实现宁可多花一堆指针空间，也不肯在插入时做整棵树的重排？",
+      "targetSection": "ALG-01",
+      "evidence": "不需要旋转与再配色"
+    },
+    {
+      "id": "B25",
+      "category": "B",
+      "question": "两个人几乎同时点了不满意，为什么后台最后只留下一张处理单？",
+      "targetSection": "SYS-10",
+      "evidence": "唯一键冲突"
+    },
+    {
+      "id": "B26",
+      "category": "B",
+      "question": "一条连接能同时跑上百个请求了，为什么丢一个包还是会把所有请求都卡住？",
+      "targetSection": "NET-06",
+      "evidence": "传输层排队"
+    },
+    {
+      "id": "B27",
+      "category": "B",
+      "question": "同一笔业务被处理了两遍、钱扣了两次，从投递语义上看问题出在哪个环节？",
+      "targetSection": "DIST-04",
+      "evidence": "至少一次"
+    },
+    {
+      "id": "B28",
+      "category": "B",
+      "question": "为什么不在一开始就让问题和候选资料互相看见，而要把充分比对留到后面一步？",
+      "targetSection": "RAG-03",
+      "evidence": "交叉编码模型"
+    },
+    {
+      "id": "B29",
+      "category": "B",
+      "question": "同一把锁能被同一个人反复拿，拿不到的又排队挂起，这两件事是怎么共用一套骨架实现的？",
+      "targetSection": "JVM-07",
+      "evidence": "双向等待队列"
+    },
+    {
+      "id": "B30",
+      "category": "B",
+      "question": "上千条一次性画到屏幕上，除了慢还会牵动哪些代价？",
+      "targetSection": "FE-03",
+      "evidence": "虚拟滚动"
+    },
+    {
+      "id": "B31",
+      "category": "B",
+      "question": "把一大堆数据交给又慢又贵的那套算法去锁，工程上没人这么干，那把钥匙究竟怎么送过去的？",
+      "targetSection": "SEC-01",
+      "evidence": "加密密钥而不是数据"
+    },
+    {
+      "id": "B32",
+      "category": "B",
+      "question": "说它没有就一定没有，说它有却可能骗人，这种东西适合放在流程的哪一层？",
+      "targetSection": "ALG-02",
+      "evidence": "没有假阳性之外的错误"
+    },
+    {
+      "id": "B33",
+      "category": "B",
+      "question": "多核之间既要让闲的核分到活，又不能让刚跑完的数据作废，这个矛盾体现在哪里？",
+      "targetSection": "OS-07",
+      "evidence": "缓存亲和"
+    },
+    {
+      "id": "B34",
+      "category": "B",
+      "question": "一条记录的历史版本被串成一条链，读的人沿着链找一个对自己合适的，这套办法叫什么？",
+      "targetSection": "DB-04",
+      "evidence": "回滚指针把历史版本串成"
+    },
+    {
+      "id": "B35",
+      "category": "B",
+      "question": "登录状态从浏览器自动带上换成手工放进请求头，风险面发生了怎样的变化？",
+      "targetSection": "SEC-04",
+      "evidence": "请求头携带令牌"
+    },
+    {
+      "id": "C11",
+      "category": "C",
+      "question": "实时音视频宁可丢帧也不等重传，这体现 UDP 的哪种取舍？什么时候必须换 QUIC？",
+      "targetSection": "NET-09",
+      "evidence": "过期的视频帧重传没有意义"
+    },
+    {
+      "id": "C12",
+      "category": "C",
+      "question": "同样是取数据，零散小读为什么比一次大读慢很多？该用哪些办法少跑几趟内核？",
+      "targetSection": "OS-06",
+      "evidence": "批量接口"
+    },
+    {
+      "id": "C13",
+      "category": "C",
+      "question": "虚拟线程和常见协程方案在挂起的那一刻各自怎么处理自己的栈？",
+      "targetSection": "OS-10",
+      "evidence": "把栈快照搬到堆上"
+    },
+    {
+      "id": "C14",
+      "category": "C",
+      "question": "偶发的通信异常往往和连接池哪个时间参数有关？几条超时该怎么排序？",
+      "targetSection": "DB-09",
+      "evidence": "空闲断开阈值"
+    },
+    {
+      "id": "C15",
+      "category": "C",
+      "question": "什么时候必须打破父先子的加载顺序？打破了会不会让核心类被第三方实现顶替？",
+      "targetSection": "JVM-04",
+      "evidence": "线程上下文类加载器"
+    },
+    {
+      "id": "C16",
+      "category": "C",
+      "question": "压测前期热点同步块耗时抖动，和锁经历的哪几步状态变化有关？",
+      "targetSection": "JVM-06",
+      "evidence": "偏向锁"
+    },
+    {
+      "id": "C17",
+      "category": "C",
+      "question": "上层早就掐断请求、下游还在慢慢跑，这种孤儿请求是超时配置哪里错了？重试该怎么限额？",
+      "targetSection": "DIST-09",
+      "evidence": "重试预算"
+    },
+    {
+      "id": "C18",
+      "category": "C",
+      "question": "菜单里藏住入口算不算安全？守卫还要防哪一种反复跳转？",
+      "targetSection": "FE-02",
+      "evidence": "开放重定向"
+    },
+    {
+      "id": "C19",
+      "category": "C",
+      "question": "资料明明都送进去了答案还是错，可能错在哪几个环节？提示词里怎么拦？",
+      "targetSection": "RAG-04",
+      "evidence": "只允许引用编号资料"
+    },
+    {
+      "id": "C20",
+      "category": "C",
+      "question": "召回名额从五条加到十条，为什么费用、干扰和注意力三头都吃亏？",
+      "targetSection": "RAG-05",
+      "evidence": "中间位置的信息更容易被忽略"
+    },
+    {
+      "id": "C21",
+      "category": "C",
+      "question": "改了数据界面却不动，先看这个变量还是不是代理，还有哪几种写法会丢响应性？",
+      "targetSection": "FE-01",
+      "evidence": "解构成普通变量"
+    },
+    {
+      "id": "C22",
+      "category": "C",
+      "question": "在参数页改了模型名称为什么没生效？有些项为什么要做成只读？",
+      "targetSection": "SYS-09",
+      "evidence": "写回配置单例"
+    },
+    {
+      "id": "C23",
+      "category": "C",
+      "question": "跨库转账不能长时间锁住所有参与者，最后靠什么让账目对得上？",
+      "targetSection": "DIST-08",
+      "evidence": "消息表"
+    },
+    {
+      "id": "C24",
+      "category": "C",
+      "question": "同样报溢出，报在栈上和报在元空间上的排查方向有什么不同？",
+      "targetSection": "JVM-01",
+      "evidence": "元空间"
+    },
+    {
+      "id": "C25",
+      "category": "C",
+      "question": "遍历顺序一模一样，数组凭什么比链表快一个数量级？分块有序结构又解决了什么？",
+      "targetSection": "ALG-05",
+      "evidence": "缓存缺失"
+    },
+    {
+      "id": "C26",
+      "category": "C",
+      "question": "域名改解析后要等一阵子才全网生效，同时权威侧靠什么区分不同用途？",
+      "targetSection": "NET-08",
+      "evidence": "按 TTL 存留"
+    },
+    {
+      "id": "C27",
+      "category": "C",
+      "question": "重复点击和网络重发都要求写接口做同一件事，从省事到最贵有四层做法，分别是什么？",
+      "targetSection": "DIST-02",
+      "evidence": "业务单号加唯一约束"
+    },
+    {
+      "id": "C28",
+      "category": "C",
+      "question": "服务列表推送给调用方之后，摘除动作本身也可能误判，为什么需要自我保护？",
+      "targetSection": "DIST-10",
+      "evidence": "就绪与存活分开"
+    },
+    {
+      "id": "C29",
+      "category": "C",
+      "question": "取十个最大值为什么要用堆而不是完整排序？分布式深翻页又麻烦在哪？",
+      "targetSection": "ALG-04",
+      "evidence": "深翻页"
+    }
+  ]
+}

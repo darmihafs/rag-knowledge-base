@@ -1,0 +1,58 @@
+HELP.md
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+.qoder/
+
+### Mac OS ###
+.DS_Store
+
+### frontend ###
+node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
+*.log
+
+### 本地上传的文档 / 向量缓存 / 数据库数据 ###
+# 后端以 backend/ 为工作目录启动，实际落盘在 backend/data/uploads，
+# 所以这里必须用 ** 匹配任意层级，写成 data/uploads/ 只会匹配仓库根目录。
+**/data/uploads/
+**/data/embeddings/
+logs/
+
+### 演示用样例文档（本地生成，不入库）###
+samples/
+
+### 密钥：一律走环境变量，禁止提交 ###
+.env
+application-local.yml

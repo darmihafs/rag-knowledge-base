@@ -1,0 +1,11 @@
+# 构建上下文瘦身：只有 pom.xml 和 src/ 进镜像
+target/
+data/
+*.log
+.mvn/
+.idea/
+*.iml
+
+# 关键：本地私密配置绝不能进镜像层（application-local.yml 里有真实密码与 api-key）
+**/application-local.yml
+src/main/resources/application-local.yml

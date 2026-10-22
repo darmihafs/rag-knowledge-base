@@ -1,0 +1,13 @@
+experiment,chunk_max_chars,chunk_overlap_chars,strategy,chunk_count,avg_chunk_chars,queries,answerable_queries,hit_rate_at_1,hit_rate_at_3,hit_rate_at_5,mrr,avg_latency_ms,p95_latency_ms,avg_top5_chars
+experiment2_chunk_sensitivity,200,30,LEXICAL,162,133.821,92,92,0.467,0.696,0.739,0.59,9.598,14,848.565
+experiment2_chunk_sensitivity,200,30,SEMANTIC,162,133.821,92,92,0.554,0.728,0.761,0.654,141.543,207,617.185
+experiment2_chunk_sensitivity,200,30,HYBRID,162,133.821,92,92,0.598,0.783,0.848,0.705,144.293,190,757.924
+experiment2_chunk_sensitivity,500,75,LEXICAL,58,336.534,92,92,0.554,0.772,0.826,0.668,7.685,10,1750.587
+experiment2_chunk_sensitivity,500,75,SEMANTIC,58,336.534,92,92,0.62,0.783,0.837,0.715,139.054,185,1711.63
+experiment2_chunk_sensitivity,500,75,HYBRID,58,336.534,92,92,0.652,0.848,0.902,0.761,149.772,195,1769.663
+experiment2_chunk_sensitivity,800,120,LEXICAL,31,631.387,92,92,0.554,0.815,0.859,0.692,5.967,8,3420.087
+experiment2_chunk_sensitivity,800,120,SEMANTIC,31,631.387,92,92,0.565,0.772,0.902,0.689,141.87,193,3035.402
+experiment2_chunk_sensitivity,800,120,HYBRID,31,631.387,92,92,0.641,0.826,0.913,0.754,140.293,188,3293.272
+experiment2_chunk_sensitivity,1200,180,LEXICAL,24,816.125,92,92,0.576,0.804,0.88,0.703,5.978,8,4942.913
+experiment2_chunk_sensitivity,1200,180,SEMANTIC,24,816.125,92,92,0.457,0.696,0.804,0.599,132.141,181,4106.848
+experiment2_chunk_sensitivity,1200,180,HYBRID,24,816.125,92,92,0.62,0.848,0.902,0.745,134.967,178,4793.12

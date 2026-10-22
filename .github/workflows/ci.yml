@@ -1,0 +1,134 @@
+# ============================================================================
+# CI：每次 push / PR 跑「后端单测 + 前端类型检查与构建 + 密钥泄漏体检」
+#   仓库推到 GitHub 后即可自动生效；本机没有 Docker，所以这里只跑单测与构建，
+#   不做镜像构建（构建脚本在 backend/Dockerfile、frontend/Dockerfile，需自行验证）。
+# ============================================================================
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新提交取消上一次还在跑的流水线，省 runner 时间
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端单测（Spring Boot + H2）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # 依赖缓存 + 先跑一次 go-offline，失败时能直接看出是网络/坐标问题而不是业务代码
+      - name: 预热依赖缓存
+        run: mvn -B -ntp dependency:go-offline
+
+      - name: 编译并运行全部测试
+        # 测试连的是 H2 内存库（src/test/resources/db/schema-h2.sql），不需要真实 MySQL；
+        # auth.secret 由 application-test.yml 提供，不依赖任何线上密钥。
+        run: mvn -B -ntp test
+
+      - name: 打包（跳过测试，测试上一步已经跑过）
+        run: mvn -B -ntp -DskipTests package
+
+      - name: 失败时保留测试报告
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: backend/target/surefire-reports/
+          retention-days: 7
+
+  frontend:
+    name: 前端类型检查与构建（Vue 3 + Vite）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci 严格按 lock 安装，保证 CI 与本地依赖一致
+      - name: 安装依赖
+        run: npm ci
+
+      # build 脚本 = vue-tsc -b && vite build：TS 类型错误在这里就失败
+      - name: 类型检查并构建
+        run: npm run build
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+  hygiene:
+    name: 密钥与结构体检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 禁止提交本地私密配置文件
+        run: |
+          set -euo pipefail
+          if find . -name 'application-local.yml' -not -path './.git/*' | grep -q .; then
+            echo '::error::application-local.yml 属于本地密钥文件，绝不能进仓库，请 git rm --cached 并加入 .gitignore'
+            exit 1
+          fi
+          if [ -f .env ]; then
+            echo '::error::.env 属于本地密钥文件，绝不能进仓库'
+            exit 1
+          fi
+          echo '密钥文件检查通过'
+
+      - name: 禁止源码里硬编码 DashScope 密钥
+        run: |
+          set -euo pipefail
+          # api-key 只允许从环境变量/占位符读取，出现 sk- 开头的字面量就直接失败
+          if grep -rInE 'sk-[A-Za-z0-9._-]{16,}' --include='*.java' --include='*.yml' --include='*.ts' \
+             --include='*.vue' --include='*.sql' . ; then
+            echo '::error::源码里出现疑似 api-key 字面量，请改为环境变量注入'
+            exit 1
+          fi
+          echo '硬编码密钥检查通过'
+
+      - name: 三份 DDL 必须都在，且表集合一致
+        run: |
+          set -euo pipefail
+          for f in backend/src/main/resources/db/schema.sql \
+                   backend/src/test/resources/db/schema-h2.sql \
+                   backend/src/main/resources/db/migration/V9__space_member.sql; do
+            [ -f "$f" ] || { echo "::error::缺少 $f"; exit 1; }
+          done
+          # 全量脚本与 H2 测试脚本必须建同一批表：少一张就是「测试全绿、生产 500」
+          grep -oiE 'CREATE TABLE( IF NOT EXISTS)? +`?[a-z0-9_]+' backend/src/main/resources/db/schema.sql \
+            | awk '{print tolower($NF)}' | tr -d '`' | sort > /tmp/mysql_tables.txt
+          grep -oiE 'CREATE TABLE( IF NOT EXISTS)? +`?[a-z0-9_]+' backend/src/test/resources/db/schema-h2.sql \
+            | awk '{print tolower($NF)}' | tr -d '`' | sort > /tmp/h2_tables.txt
+          if ! diff -u /tmp/mysql_tables.txt /tmp/h2_tables.txt; then
+            echo '::error::schema.sql 与 schema-h2.sql 的表集合不一致，请补齐缺的那份'
+            exit 1
+          fi
+          echo 'DDL 文件齐全，两份建表集合一致'

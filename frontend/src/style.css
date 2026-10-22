@@ -1,0 +1,32 @@
+:root {
+  font-family: Inter, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  min-height: 100%;
+}
+
+body {
+  background: var(--el-bg-color-page, #f5f7fa);
+  color: var(--el-text-color-primary, #303133);
+}
+
+a {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}

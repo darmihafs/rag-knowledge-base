@@ -1,0 +1,101 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      force: true
+
+spring:
+  # 本地私密配置（数据库密码等），文件已被 .gitignore 忽略；不存在时不报错
+  config:
+    import: optional:classpath:application-local.yml
+  application:
+    name: kb-backend
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 连接信息全部走环境变量，本地默认连本机 MySQL；库名 kb_rag 需先手工创建（见 db/schema.sql）
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DB:kb_rag}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 200MB
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.bishe.kb.model.entity
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# RAG 参数，映射到 com.bishe.kb.config.RagProperties
+rag:
+  api-key: ${RAG_API_KEY:}
+  # 百炼(DashScope)兼容模式；换 DeepSeek 填 https://api.deepseek.com/v1，本地 vLLM/Ollama 填 http://127.0.0.1:11434/v1
+  base-url: ${RAG_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+  chat-model: ${RAG_CHAT_MODEL:qwen-plus}
+  embedding-model: ${RAG_EMBEDDING_MODEL:text-embedding-v3}
+  # false = 只做解析/分块/落库，不调向量接口；true = 上传时向量化写入本地向量库，问答走「语义+词法」双路召回
+  embedding-enabled: ${RAG_EMBEDDING_ENABLED:true}
+  # 向量库持久化文件（InMemoryEmbeddingStore 序列化，重启自动加载，零外部依赖）
+  embedding-store-path: ${RAG_EMBEDDING_STORE_PATH:./data/embeddings/store.json}
+  # text-embedding-v3 批量上限较小，按此切批调用，避免服务端拒绝
+  embedding-batch-size: ${RAG_EMBEDDING_BATCH_SIZE:10}
+  # 问题向量化超时秒数：检索慢就是体验事故，超时应明显短于对话模型的 60 秒，让词法路及时顶上
+  embedding-timeout-seconds: ${RAG_EMBEDDING_TIMEOUT_SECONDS:20}
+  # 问题向量缓存条数（同模型同问题的向量是确定性的，只受内存约束）；0 = 关闭缓存
+  embedding-query-cache-size: ${RAG_EMBEDDING_QUERY_CACHE_SIZE:512}
+  # RRF 倒数排名融合常数 k：得分 = Σ 1/(k + rank)，60 为通用默认
+  rrf-k: ${RAG_RRF_K:60}
+  # 语义召回最低相似度阈值，0 = 只按排名截断不做绝对分数过滤（利于同义词命中）
+  semantic-min-score: ${RAG_SEMANTIC_MIN_SCORE:0.0}
+  # 词法召回实现：fulltext = 走 kb_chunk 的 FULLTEXT ngram 索引（默认）；like = 逐词 LIKE 全表扫描兜底
+  # （给 H2 等不支持 MATCH ... AGAINST 的库用；fulltext 下 SQL 一旦异常也会自动退回 like）
+  lexical-mode: ${RAG_LEXICAL_MODE:fulltext}
+  # true = 不调大模型，用检索结果拼一段演示回答并逐字推送（无密钥时验证 SSE 链路用），生产必须 false
+  mock-enabled: ${RAG_MOCK_ENABLED:false}
+  temperature: 0.2
+  chunk-max-chars: 800
+  chunk-overlap-chars: 120
+  top-k: 5
+  min-score: 0.6
+  # 多轮对话记忆：带最近 6 条历史消息（= 3 轮问答），设 0 可退回单轮；单条历史最多 1200 字
+  history-messages: ${RAG_HISTORY_MESSAGES:6}
+  history-max-chars: 1200
+  upload-dir: ./data/uploads
+  # 文档异步入库：上传只负责落盘与入队，解析/分块/向量化在后台线程池执行。
+  # PDFBox 是 CPU/内存密集型，固定小线程数避免并发大文件打满堆内存；队列满时上传明确失败而非挂起请求。
+  ingest-threads: ${RAG_INGEST_THREADS:2}
+  ingest-queue-capacity: ${RAG_INGEST_QUEUE_CAPACITY:100}
+  # 知识库 Agent：硬超时 90 秒（到点取消 worker 并返回 TIME_LIMIT），独立 4 线程 + 32 排队。
+  # 超时不再只在轮次之间检查，供应商 HTTP 挂住也不会让请求永久占线。
+  agent-timeout-millis: ${RAG_AGENT_TIMEOUT_MILLIS:90000}
+  agent-threads: ${RAG_AGENT_THREADS:4}
+  agent-queue-capacity: ${RAG_AGENT_QUEUE_CAPACITY:32}
+
+# 认证与鉴权，映射到 com.bishe.kb.config.AuthProperties
+auth:
+  # JWT 签名密钥（HS256+ 要求至少 32 字节）。这里刻意不给默认值：密钥一旦写进代码就等于公开，
+  # 任何人都能伪造管理员 token。本地写在 git-ignored 的 application-local.yml，
+  # 服务器用环境变量 AUTH_JWT_SECRET；两者都缺失时 JwtUtil 直接让启动失败，绝不带默认密钥上线。
+  secret: ${AUTH_JWT_SECRET:}
+  # token 有效期（分钟），默认 12 小时；改密码/被重置/主动退出会递增 sys_user.token_version 立刻作废旧 token
+  expire-minutes: ${AUTH_EXPIRE_MINUTES:720}
+  # 测试放行开关：仅测试环境置 true（缺 token 时注入管理员身份），生产必须 false
+  test-bypass: ${AUTH_TEST_BYPASS:false}
+
+logging:
+  level:
+    root: info
+    com.bishe.kb: debug

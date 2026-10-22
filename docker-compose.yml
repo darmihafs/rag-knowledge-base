@@ -1,0 +1,97 @@
+# ============================================================================
+# 一键起全栈：MySQL 8 + Spring Boot 后端 + nginx 前端
+#   1) cp .env.example .env       # 填 MySQL 密码、JWT 密钥、DashScope api-key
+#   2) docker compose up -d --build
+#   3) 浏览器打开 http://localhost:5080，admin / admin123
+#
+# 说明：
+#   * 首次启动（kb-mysql-data 卷为空）会自动执行 backend/src/main/resources/db/schema.sql
+#     建库建表并写入种子账号；卷已存在时 initdb 不再执行，老库升级要手工跑 db/migration/V*.sql。
+#   * 本机没装 Docker，这份 compose 与两个 Dockerfile 是按官方镜像约定写的，
+#     尚未在真实 Docker 里跑通过（见 README「未验证项」）。
+# ============================================================================
+name: bishe-kb-rag
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: kb-mysql
+    restart: unless-stopped
+    # ngram_token_size 必须为 2：词法召回按中文 2-gram 切词，全文索引要用同一口径才命中
+    command:
+      - --ngram-token-size=2
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --default-time-zone=+08:00
+      - --max_connections=200
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?必填，见 .env}
+      TZ: Asia/Shanghai
+    volumes:
+      - kb-mysql-data:/var/lib/mysql
+      # 只在数据卷为空时执行一次
+      - ./backend/src/main/resources/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "${MYSQL_EXPOSE_PORT:-13306}:3306"
+    healthcheck:
+      # 用容器内环境变量取密码（$$ 让 compose 不插值），避免密码出现在 docker inspect 里
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  backend:
+    build:
+      context: ./backend
+    image: kb-backend:local
+    container_name: kb-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DB: kb_rag
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?必填，见 .env}
+      # JWT 签名密钥：缺失时后端直接启动失败（JwtUtil fail-fast），不给默认值
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?必填，至少 32 字节，见 .env}
+      AUTH_EXPIRE_MINUTES: ${AUTH_EXPIRE_MINUTES:-720}
+      AUTH_TEST_BYPASS: "false"
+      # 大模型：不填 api-key 也能起，问答会走「检索结果拼演示回答」的 mock 分支
+      RAG_API_KEY: ${RAG_API_KEY:-}
+      RAG_BASE_URL: ${RAG_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      RAG_CHAT_MODEL: ${RAG_CHAT_MODEL:-qwen-plus}
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-text-embedding-v3}
+      RAG_EMBEDDING_ENABLED: ${RAG_EMBEDDING_ENABLED:-true}
+      RAG_MOCK_ENABLED: ${RAG_MOCK_ENABLED:-false}
+      # 词法召回：fulltext 走 ngram 全文索引；like 是逐词全表扫描的兜底路径
+      RAG_LEXICAL_MODE: ${RAG_LEXICAL_MODE:-fulltext}
+      # 语义路：问题向量化超时秒数、问题向量缓存条数（0 = 关闭缓存）
+      RAG_EMBEDDING_TIMEOUT_SECONDS: ${RAG_EMBEDDING_TIMEOUT_SECONDS:-20}
+      RAG_EMBEDDING_QUERY_CACHE_SIZE: ${RAG_EMBEDDING_QUERY_CACHE_SIZE:-512}
+      TZ: Asia/Shanghai
+    volumes:
+      # 上传原文与向量库持久化文件必须出容器，否则重建容器就全丢了
+      - kb-uploads:/app/data/uploads
+      - kb-embeddings:/app/data/embeddings
+    expose:
+      - "8080"
+
+  frontend:
+    build:
+      context: ./frontend
+    image: kb-frontend:local
+    container_name: kb-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${WEB_PORT:-5080}:80"
+
+volumes:
+  kb-mysql-data:
+  kb-uploads:
+  kb-embeddings:
