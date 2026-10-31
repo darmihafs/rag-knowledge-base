@@ -12,6 +12,7 @@ import com.bishe.kb.service.SysUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -71,7 +72,11 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
         user.setNickname(StringUtils.isBlank(request.nickname()) ? username : request.nickname().trim());
         user.setRole(SysUser.ROLE_USER);
         user.setStatus(SysUser.STATUS_ENABLED);
-        save(user);
+        try {
+            save(user);
+        } catch (DuplicateKeyException e) {
+            throw new BizException(4002, "用户名已被占用（可能是历史已删除账号）");
+        }
         // 新账号必须有一条成员行，否则「可见集合为空 = 拒绝一切」会把它关在库外：
         // 注册完问什么都没结果，看起来像检索坏了，其实是没人给他授权过
         spaceAccessService.joinDefaultSpace(user);

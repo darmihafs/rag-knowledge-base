@@ -2,6 +2,7 @@ package com.bishe.kb.common;
 
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
@@ -76,6 +77,13 @@ public class GlobalExceptionHandler {
     public Result<Void> handleTypeMismatch(MethodArgumentTypeMismatchException e) {
         log.warn("参数类型不匹配: {}={}", e.getName(), e.getValue());
         return Result.fail(4004, "请求参数格式错误：" + e.getName() + " 的值不合法");
+    }
+
+    /** 数据库唯一键冲突兜底，防止抛 500 */
+    @ExceptionHandler(DuplicateKeyException.class)
+    public Result<Void> handleDuplicateKey(DuplicateKeyException e) {
+        log.warn("唯一约束冲突: {}", e.getMessage());
+        return Result.fail(4090, "数据已存在或唯一标识冲突");
     }
 
     @ExceptionHandler(Exception.class)
