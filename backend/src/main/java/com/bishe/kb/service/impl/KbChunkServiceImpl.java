@@ -93,6 +93,7 @@ public class KbChunkServiceImpl extends ServiceImpl<KbChunkMapper, KbChunk> impl
         // 正文变了，旧向量已失效：先移除，启用态下再按新正文重新嵌入。
         // 排到提交之后：新正文还没落库时不能先把旧向量删掉，否则这段内容会在两条召回路上同时消失。
         boolean enabled = isEnabled(chunk);
+        chunk.setSpaceId(spaceIdOf(chunk.getDocumentId()));
         AfterCommitRunner.run(() -> {
             vectorIndexService.removeChunk(id);
             if (enabled) {
@@ -116,6 +117,7 @@ public class KbChunkServiceImpl extends ServiceImpl<KbChunkMapper, KbChunk> impl
         updateById(chunk);
 
         // 与批量启停同一套顺序：enabled 先落库并提交，再动向量库
+        chunk.setSpaceId(spaceIdOf(chunk.getDocumentId()));
         AfterCommitRunner.run(() -> {
             if (next == 1) {
                 // 重新启用：把分段写回向量库，语义召回恢复
@@ -131,6 +133,29 @@ public class KbChunkServiceImpl extends ServiceImpl<KbChunkMapper, KbChunk> impl
 
     private boolean isEnabled(KbChunk chunk) {
         return chunk.getEnabled() == null || chunk.getEnabled() == 1;
+    }
+
+    /** 单条切片所属空间：向量元数据要在重新嵌入时带上它，语义召回才能做空间前置过滤 */
+    private Long spaceIdOf(Long documentId) {
+        if (documentId == null) {
+            return null;
+        }
+        KbDocument doc = documentMapper.selectById(documentId);
+        return doc == null ? null : doc.getSpaceId();
+    }
+
+    /** 批量补齐切片所属空间；一次反查文档，避免逐条查询 */
+    private void attachSpaceIds(List<KbChunk> chunks) {
+        Set<Long> documentIds = chunks.stream().map(KbChunk::getDocumentId)
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+        if (documentIds.isEmpty()) {
+            return;
+        }
+        Map<Long, Long> spaceByDocument = new HashMap<>();
+        // 手工遍历而不是 Collectors.toMap：历史文档的 space_id 可能为 null，toMap 遇 null value 会抛 NPE
+        documentMapper.selectBatchIds(documentIds)
+                .forEach(doc -> spaceByDocument.put(doc.getId(), doc.getSpaceId()));
+        chunks.forEach(chunk -> chunk.setSpaceId(spaceByDocument.get(chunk.getDocumentId())));
     }
 
     // ------------------------------------------------------------------ 全局语料中心
@@ -208,7 +233,8 @@ public class KbChunkServiceImpl extends ServiceImpl<KbChunkMapper, KbChunk> impl
             return 0;
         }
         updateBatchById(changed);
-        // 先把 id 与实体快照定下来：提交后才执行向量同步，不能依赖之后还可能被改的集合
+        // 先把 id、实体快照与空间归属定下来：提交后才执行向量同步，不能依赖之后还可能被改的集合
+        attachSpaceIds(changed);
         List<KbChunk> toSync = List.copyOf(changed);
         List<Long> idsToUnindex = List.copyOf(changedIds);
 

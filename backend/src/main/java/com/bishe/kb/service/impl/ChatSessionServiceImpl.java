@@ -163,6 +163,7 @@ public class ChatSessionServiceImpl extends ServiceImpl<ChatSessionMapper, ChatS
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Long saveAssistantMessage(Long sessionId, String answer, List<AskResponse.Citation> citations) {
         ChatMessage message = new ChatMessage();
         message.setSessionId(sessionId);

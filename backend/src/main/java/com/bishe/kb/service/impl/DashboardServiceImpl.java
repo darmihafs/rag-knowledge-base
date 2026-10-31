@@ -9,7 +9,6 @@ import com.bishe.kb.mapper.KbSpaceMapper;
 import com.bishe.kb.model.dto.AuditPageQuery;
 import com.bishe.kb.model.entity.ChatMessage;
 import com.bishe.kb.model.entity.KbDocument;
-import com.bishe.kb.model.entity.KbSpace;
 import com.bishe.kb.model.vo.ActivityVO;
 import com.bishe.kb.model.vo.DashboardStatsVO;
 import com.bishe.kb.model.vo.FormatSlice;
@@ -25,11 +24,11 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 /**
  * 数据大盘统计实现。
@@ -109,9 +108,13 @@ public class DashboardServiceImpl implements DashboardService {
         }
         List<Long> spaceIds = docs.stream().map(KbDocument::getSpaceId)
                 .filter(Objects::nonNull).distinct().toList();
-        Map<Long, String> names = spaceIds.isEmpty() ? Map.of()
-                : spaceMapper.selectBatchIds(spaceIds).stream()
-                        .collect(Collectors.toMap(KbSpace::getId, KbSpace::getName, (a, b) -> a));
+        Map<Long, String> names = new HashMap<>();
+        if (!spaceIds.isEmpty()) {
+            // 手工 put 而不是 Collectors.toMap：历史数据里空间名可能为 null，
+            // toMap 遇 null value 会直接抛 NPE，整个大盘动态流就一起 500 了。
+            spaceMapper.selectBatchIds(spaceIds)
+                    .forEach(s -> names.put(s.getId(), StringUtils.defaultIfBlank(s.getName(), "未命名空间")));
+        }
 
         return docs.stream()
                 .map(d -> new ActivityVO.RecentDocument(d.getId(), d.getTitle(), d.getFileType(),

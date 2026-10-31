@@ -21,6 +21,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashMap;
 import java.util.List;
@@ -82,6 +83,7 @@ public class UserAdminServiceImpl implements UserAdminService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public AdminUserVO createUser(UserCreateRequest request) {
         String username = StringUtils.trimToEmpty(request.username());
         if (userService.findByUsername(username) != null) {
@@ -105,6 +107,7 @@ public class UserAdminServiceImpl implements UserAdminService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public AdminUserVO updateRole(Long userId, String role, LoginUser operator) {
         SysUser user = requireUser(userId);
         String target = normalizeRole(role);

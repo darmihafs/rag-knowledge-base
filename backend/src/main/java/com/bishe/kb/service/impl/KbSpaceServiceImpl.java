@@ -6,10 +6,12 @@ import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
 import com.bishe.kb.common.BizException;
 import com.bishe.kb.mapper.KbDocumentMapper;
 import com.bishe.kb.mapper.KbSpaceMapper;
+import com.bishe.kb.mapper.KbSpaceMemberMapper;
 import com.bishe.kb.model.dto.SpacePageQuery;
 import com.bishe.kb.model.dto.SpaceSaveRequest;
 import com.bishe.kb.model.entity.KbDocument;
 import com.bishe.kb.model.entity.KbSpace;
+import com.bishe.kb.model.entity.KbSpaceMember;
 import com.bishe.kb.model.vo.SpaceVO;
 import com.bishe.kb.security.LoginUser;
 import com.bishe.kb.security.UserContext;
@@ -18,6 +20,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -36,6 +39,7 @@ import java.util.List;
 public class KbSpaceServiceImpl extends ServiceImpl<KbSpaceMapper, KbSpace> implements KbSpaceService {
 
     private final KbDocumentMapper documentMapper;
+    private final KbSpaceMemberMapper memberMapper;
 
     @Override
     public Page<SpaceVO> pageSpaces(SpacePageQuery query) {
@@ -86,6 +90,7 @@ public class KbSpaceServiceImpl extends ServiceImpl<KbSpaceMapper, KbSpace> impl
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void deleteSpace(Long id) {
         if (id != null && id == DEFAULT_SPACE_ID) {
             throw new BizException("默认知识库不可删除");
@@ -99,8 +104,12 @@ public class KbSpaceServiceImpl extends ServiceImpl<KbSpaceMapper, KbSpace> impl
         if (docCount > 0) {
             throw new BizException("该知识库下仍有 " + docCount + " 篇文档，请先删除或迁移后再删空间");
         }
+        // 空间和成员行必须同进同退：只删空间会留下孤儿授权，
+        // 之后自增 ID 复用时可能把新空间意外授权给旧用户。
+        int members = memberMapper.delete(new LambdaQueryWrapper<KbSpaceMember>()
+                .eq(KbSpaceMember::getSpaceId, id));
         removeById(id);
-        log.info("删除知识库空间 id={} name={}", id, space.getName());
+        log.info("删除知识库空间 id={} name={} 清理成员授权={} 条", id, space.getName(), members);
     }
 
     @Override

@@ -51,4 +51,13 @@ public class KbChunk {
      */
     @TableField(exist = false)
     private Double relevance;
+
+    /**
+     * 所属空间 ID（不是表字段，仅向量化时由调用方补齐）。
+     *
+     * <p>向量库需要它来做空间前置过滤：召回在向量库内部就收敛到可见空间，
+     * 而不是先全库召回再回表过滤——后者会让越权切片挤占 topK。
+     */
+    @TableField(exist = false)
+    private Long spaceId;
 }

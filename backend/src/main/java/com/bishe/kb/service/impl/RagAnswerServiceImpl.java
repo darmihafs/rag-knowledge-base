@@ -28,6 +28,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.MediaType;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -37,6 +38,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 /**
@@ -113,24 +115,54 @@ public class RagAnswerServiceImpl implements RagAnswerService {
         // ThreadLocal 不跨线程：先在 Tomcat 请求线程上抓住当前登录用户，
         // 再随任务带进业务线程池，否则 doStream 里的会话归属校验会因取不到用户而失败。
         LoginUser current = UserContext.get();
-        // 立刻交给业务线程池，Tomcat 请求线程马上释放
-        ragStreamExecutor.execute(() -> {
-            if (current != null) {
-                UserContext.set(current);
-            }
-            try {
-                doStream(request, emitter);
-            } finally {
-                // 线程会被复用，务必清理，避免身份串号
-                UserContext.clear();
-            }
+        // 断连 / 超时只置一个协作取消标记：LangChain4j 的 StreamingChatModel 没有暴露取消句柄，
+        // 但至少要做到「不再写库、不再往已关闭的连接推事件」，避免半截回答污染会话历史。
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        emitter.onTimeout(() -> {
+            cancelled.set(true);
+            log.warn("SSE 超时结束 question={}", StringUtils.abbreviate(request.question(), 40));
+            complete(emitter);
         });
+        emitter.onError(e -> {
+            cancelled.set(true);
+            log.debug("SSE 连接异常（多为前端主动取消）: {}", e.getMessage());
+        });
+        emitter.onCompletion(() -> {
+            cancelled.set(true);
+            log.debug("SSE 连接关闭 question={}", StringUtils.abbreviate(request.question(), 40));
+        });
+
+        try {
+            // 立刻交给业务线程池，Tomcat 请求线程马上释放
+            ragStreamExecutor.execute(() -> {
+                if (current != null) {
+                    UserContext.set(current);
+                }
+                try {
+                    doStream(request, emitter, current, cancelled);
+                } finally {
+                    // 线程会被复用，务必清理，避免身份串号
+                    UserContext.clear();
+                }
+            });
+        } catch (TaskRejectedException e) {
+            // 线程池已改成 AbortPolicy：满了就明确拒绝，绝不能把几十秒的流式任务压回 Tomcat 线程
+            cancelled.set(true);
+            log.warn("流式问答队列已满，拒绝本次请求 question={}",
+                    StringUtils.abbreviate(request.question(), 40));
+            sendError(emitter, 4290, "当前问答请求过多，请稍后重试");
+        }
     }
 
-    private void doStream(AskStreamRequest request, SseEmitter emitter) {
+    private void doStream(AskStreamRequest request, SseEmitter emitter, LoginUser current,
+                          AtomicBoolean cancelled) {
         long start = System.currentTimeMillis();
         Long sessionId = request.sessionId();
         try {
+            if (cancelled.get()) {
+                log.debug("客户端在任务开始前已断开，跳过 session={}", sessionId);
+                return;
+            }
             boolean mock = props.isMockEnabled();
             if (!mock && StringUtils.isBlank(props.getApiKey())) {
                 sendError(emitter, 5001, "未配置模型密钥：请设置环境变量 RAG_API_KEY 后重启后端");
@@ -145,10 +177,19 @@ public class RagAnswerServiceImpl implements RagAnswerService {
 
             // 1) 先取历史（此时本轮提问还没入库）2) 再落库用户提问
             List<ChatTurn> history = sessionService.loadRecentHistory(sessionId, props.getHistoryMessages());
+            // 已经断开就不写用户消息：否则历史里会留下一条永远没有回答的提问
+            if (cancelled.get()) {
+                log.debug("客户端在落库前断开，本轮提问不写入 session={}", sessionId);
+                return;
+            }
             sessionService.saveUserMessage(sessionId, request.question());
 
             int topK = topK(request.topK());
             List<KbChunk> hits = retrievalService.retrieve(request.question(), topK, scope);
+            if (cancelled.get()) {
+                log.debug("客户端在召回后断开，停止推送 session={}", sessionId);
+                return;
+            }
             Map<Long, String> titles = loadTitles(hits);
             send(emitter, "meta", Map.of(
                     "retrieved", hits.size(),
@@ -161,10 +202,13 @@ public class RagAnswerServiceImpl implements RagAnswerService {
             // 只有「既没检索到资料、又没有历史可依据」才走固定提示；
             // 有历史时说明这是一次追问（如“它”“上面第二点”），交给模型基于对话上下文作答。
             if (noHit && history.isEmpty()) {
-                streamText(emitter, NO_HIT_TEXT);
+                streamText(emitter, NO_HIT_TEXT, cancelled);
+                if (cancelled.get()) {
+                    return;
+                }
                 send(emitter, "citations", List.of());
                 // 没召回也是一轮完整对话，照样落库，否则刷新页面这一问就消失了
-                Long savedId = persistAssistant(sessionId, NO_HIT_TEXT, List.of());
+                Long savedId = persistAssistant(current, sessionId, NO_HIT_TEXT, List.of());
                 sendDone(emitter, start, savedId);
                 return;
             }
@@ -176,9 +220,12 @@ public class RagAnswerServiceImpl implements RagAnswerService {
                 String answer = noHit
                         ? mockFollowUp(request.question(), history.size())
                         : mockAnswer(request.question(), hits, titles, history.size());
-                streamText(emitter, answer);
+                streamText(emitter, answer, cancelled);
+                if (cancelled.get()) {
+                    return;
+                }
                 send(emitter, "citations", citations);
-                Long mockAnswerId = persistAssistant(sessionId, answer, citations);
+                Long mockAnswerId = persistAssistant(current, sessionId, answer, citations);
                 sendDone(emitter, start, mockAnswerId);
                 return;
             }
@@ -192,21 +239,31 @@ public class RagAnswerServiceImpl implements RagAnswerService {
             streamingChatModel.chat(messages, new StreamingChatResponseHandler() {
                 @Override
                 public void onPartialResponse(String partialResponse) {
-                    if (StringUtils.isEmpty(partialResponse)) {
+                    if (StringUtils.isEmpty(partialResponse) || cancelled.get()) {
                         return;
                     }
                     answerBuffer.append(partialResponse);
-                    send(emitter, "delta", Map.of("text", partialResponse));
+                    try {
+                        send(emitter, "delta", Map.of("text", partialResponse));
+                    } catch (SseClosedException e) {
+                        // 回调线程抛异常只会被 LangChain4j 记日志，这里自己标记取消，后续增量不再处理
+                        cancelled.set(true);
+                        log.debug("SSE 已关闭，停止接收模型增量 session={}", sessionId);
+                    }
                 }
 
                 @Override
                 public void onCompleteResponse(ChatResponse completeResponse) {
+                    if (cancelled.get()) {
+                        log.info("客户端已断开，丢弃本次模型回答 session={}", sessionId);
+                        return;
+                    }
                     // 引用来源放在回答末尾推送，前端收到后再渲染“参考资料”
                     send(emitter, "citations", citations);
                     String answer = answerBuffer.length() > 0
                             ? answerBuffer.toString()
                             : StringUtils.defaultString(completeResponse.aiMessage().text());
-                    Long answerId = persistAssistant(sessionId, answer, citations);
+                    Long answerId = persistAssistant(current, sessionId, answer, citations);
                     sendDone(emitter, start, answerId);
                     log.info("流式问答完成 session={} question={} 召回={} 历史={} 耗时={}ms",
                             sessionId, StringUtils.abbreviate(request.question(), 40), hits.size(),
@@ -215,6 +272,10 @@ public class RagAnswerServiceImpl implements RagAnswerService {
 
                 @Override
                 public void onError(Throwable error) {
+                    if (cancelled.get()) {
+                        log.debug("客户端已断开，忽略模型回调错误 session={}: {}", sessionId, rootMessage(error));
+                        return;
+                    }
                     log.error("流式问答模型调用失败 session={}", sessionId, error);
                     // 失败的半截回答不落库：下次提问时它只会污染上下文
                     sendError(emitter, 5002, "模型调用失败：" + rootMessage(error));
@@ -237,15 +298,31 @@ public class RagAnswerServiceImpl implements RagAnswerService {
      * 所以必须在 {@code done} 事件发出前拿到自增 ID——这里改为同步写：一次 insert 只有几毫秒，
      * 远比把落库丢回线程池再等 Future 划算（线程池被本次流式任务占着，嵌套提交有饥饿风险）。
      *
+     * <p>显式带上请求线程快照的用户：{@code onCompleteResponse} 运行在 OkHttp 回调线程上，
+     * 那里没有 ThreadLocal 身份。当前持久化不依赖上下文，但把身份补齐能让后续任何
+     * 归属校验/审计逻辑不会突然 NPE 或串号。
+     *
      * @return 消息 ID；落库失败返回 null，前端据此禁用该条回答的反馈按钮
      */
-    private Long persistAssistant(Long sessionId, String answer, List<AskResponse.Citation> citations) {
+    private Long persistAssistant(LoginUser user, Long sessionId, String answer,
+                                  List<AskResponse.Citation> citations) {
+        LoginUser previous = UserContext.get();
+        if (user != null) {
+            UserContext.set(user);
+        }
         try {
             return sessionService.saveAssistantMessage(sessionId, answer, citations);
         } catch (RuntimeException e) {
             // 落库失败不影响已经推给前端的回答，只记日志
             log.error("回答落库失败 session={}", sessionId, e);
             return null;
+        } finally {
+            // 回调线程同样会被复用（OkHttp 连接池线程），绝不能把身份留在上面
+            if (previous == null) {
+                UserContext.clear();
+            } else {
+                UserContext.set(previous);
+            }
         }
     }
 
@@ -295,9 +372,12 @@ public class RagAnswerServiceImpl implements RagAnswerService {
         }
     }
 
-    /** 演示模式 / 无召回时的逐字推送 */
-    private void streamText(SseEmitter emitter, String text) {
+    /** 演示模式 / 无召回时的逐字推送，每个增量前检查一次协作取消标记 */
+    private void streamText(SseEmitter emitter, String text, AtomicBoolean cancelled) {
         for (int i = 0; i < text.length(); i += MOCK_STEP) {
+            if (cancelled.get()) {
+                return;
+            }
             send(emitter, "delta", Map.of("text", text.substring(i, Math.min(text.length(), i + MOCK_STEP))));
             sleep(MOCK_DELAY_MILLIS);
         }

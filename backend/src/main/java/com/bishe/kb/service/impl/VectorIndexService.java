@@ -2,6 +2,7 @@ package com.bishe.kb.service.impl;
 
 import com.bishe.kb.config.RagProperties;
 import com.bishe.kb.model.entity.KbChunk;
+import com.bishe.kb.service.RetrievalScope;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.embedding.Embedding;
@@ -12,15 +13,18 @@ import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.store.embedding.filter.Filter;
 import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -53,6 +57,9 @@ public class VectorIndexService {
 
     /** 向量化耗时超过这个阈值就记一条 warn，慢在哪里至少留在日志里 */
     private static final long SLOW_EMBED_MILLIS = 3_000L;
+
+    /** 前置过滤没命中时，为兼容没有 spaceId 元数据的旧向量而退回全库搜索的候选放大倍数 */
+    private static final int LEGACY_FALLBACK_FACTOR = 3;
 
     /** 预热探针句子：只走一次公网建立连接与鉴权，不进缓存 */
     private static final String WARM_UP_PROBE = "私有知识库问答系统启动预热";
@@ -383,9 +390,29 @@ public class VectorIndexService {
     /**
      * 语义召回：把问题向量化后在向量库做余弦相似搜索，返回命中的 chunkId 列表（按相似度降序）。
      *
+     * <p>只做向量相似，不做空间过滤；需要空间收敛时用
+     * {@link #searchChunkIds(String, int, RetrievalScope)}。
+     *
      * @return 命中的 kb_chunk 主键；未启用或异常时返回空列表
      */
     public List<Long> searchChunkIds(String question, int maxResults) {
+        return searchChunkIds(question, maxResults, null);
+    }
+
+    /**
+     * 带空间前置过滤的语义召回。
+     *
+     * <p>过滤条件交给向量库，而不是召回后再用 SQL/内存筛：后者会让未授权空间的高分切片
+     * 占满 {@code maxResults}，收敛空间后 topK 反而变少，隔离也只是「偶尔生效」。
+     *
+     * <p>兼容旧数据：升级前写入的向量没有 {@code spaceId} 元数据，前置过滤会全部落空。
+     * 此时退回一次不带过滤的放大搜索，由回表阶段按 {@code RetrievalScope} 做后置过滤——
+     * 安全性仍由后置过滤保证，代价只是这些旧条目还没享受前置收敛。
+     *
+     * @param scope 检索范围；null / unrestricted 表示不做空间过滤
+     * @return 命中的 kb_chunk 主键；未启用或异常时返回空列表
+     */
+    public List<Long> searchChunkIds(String question, int maxResults, RetrievalScope scope) {
         if (!isEnabled() || maxResults <= 0 || question == null || question.isBlank()) {
             return List.of();
         }
@@ -395,15 +422,14 @@ public class VectorIndexService {
                 log.warn("问题向量化返回空向量，本次退回纯词法检索: {}", question);
                 return List.of();
             }
-            EmbeddingSearchRequest request = EmbeddingSearchRequest.builder()
-                    .queryEmbedding(query)
-                    .maxResults(maxResults)
-                    .minScore(props.getSemanticMinScore())
-                    .build();
-            EmbeddingSearchResult<TextSegment> result = embeddingStore.search(request);
-            List<Long> ids = new ArrayList<>();
-            for (EmbeddingMatch<TextSegment> match : result.matches()) {
-                ids.add(Long.parseLong(match.embeddingId()));
+            Filter filter = spaceFilter(scope);
+            List<Long> ids = search(query, maxResults, filter);
+            if (ids.isEmpty() && filter != null) {
+                int fallbackLimit = maxResults * LEGACY_FALLBACK_FACTOR;
+                ids = search(query, fallbackLimit, null);
+                if (!ids.isEmpty()) {
+                    log.debug("空间前置过滤无命中，已退回全库搜索以兼容旧向量条目（候选 {} 条）", ids.size());
+                }
             }
             return ids;
         } catch (RuntimeException e) {
@@ -413,30 +439,85 @@ public class VectorIndexService {
         }
     }
 
-    /** 分段 -> 向量库条目：正文用于 embed，元数据带上三个业务 ID 便于反查与按文档删除 */
+    private List<Long> search(Embedding query, int maxResults, Filter filter) {
+        EmbeddingSearchRequest.EmbeddingSearchRequestBuilder builder = EmbeddingSearchRequest.builder()
+                .queryEmbedding(query)
+                .maxResults(maxResults)
+                .minScore(props.getSemanticMinScore());
+        if (filter != null) {
+            builder.filter(filter);
+        }
+        EmbeddingSearchResult<TextSegment> result = embeddingStore.search(builder.build());
+        List<Long> ids = new ArrayList<>(result.matches().size());
+        for (EmbeddingMatch<TextSegment> match : result.matches()) {
+            ids.add(Long.parseLong(match.embeddingId()));
+        }
+        return ids;
+    }
+
+    /**
+     * {@link RetrievalScope} -> 向量库元数据过滤器。
+     *
+     * <p>空授权集合返回 null 是安全的：调用方（{@code RetrievalServiceImpl}）在进入召回前
+     * 已用 {@code deniesEverything()} 直接返回空结果，不会把「什么都不许看」送到这里。
+     */
+    private Filter spaceFilter(RetrievalScope scope) {
+        if (scope == null || !scope.restricted()) {
+            return null;
+        }
+        if (scope.spaceId() != null) {
+            return metadataKey("spaceId").isEqualTo(scope.spaceId().longValue());
+        }
+        List<Long> visible = scope.visibleSpaceIds();
+        return visible == null || visible.isEmpty() ? null : metadataKey("spaceId").isIn(visible);
+    }
+
+    /** 分段 -> 向量库条目：正文用于 embed，元数据带上业务 ID 便于反查、按文档删除与空间前置过滤 */
     private TextSegment toSegment(KbChunk chunk) {
         dev.langchain4j.data.document.Metadata metadata = new dev.langchain4j.data.document.Metadata()
                 .put("chunkId", chunk.getId())
                 .put("documentId", chunk.getDocumentId())
                 .put("chunkIndex", chunk.getChunkIndex() == null ? 0 : chunk.getChunkIndex());
+        if (chunk.getSpaceId() != null) {
+            metadata.put("spaceId", chunk.getSpaceId().longValue());
+        }
         return TextSegment.from(chunk.getContent(), metadata);
     }
 
-    /** 内存向量库序列化到本地 JSON，失败只告警不影响主流程 */
+    /**
+     * 内存向量库序列化到本地 JSON，失败只告警不影响主流程。
+     *
+     * <p>先写同目录临时文件再原子替换：直接写目标文件时，进程在序列化中途退出会留下
+     * 半截 JSON，重启后 {@code fromFile} 失败，整个语义召回路静默变哑。
+     */
     private void persist() {
         if (!(embeddingStore instanceof InMemoryEmbeddingStore<?> store)) {
             return;
         }
         Path path = Paths.get(props.getEmbeddingStorePath()).toAbsolutePath().normalize();
+        Path temp = path.resolveSibling(path.getFileName() + ".tmp");
         try {
             if (path.getParent() != null) {
                 Files.createDirectories(path.getParent());
             }
             synchronized (persistLock) {
-                store.serializeToFile(path);
+                store.serializeToFile(temp);
+                try {
+                    Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE,
+                            StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException e) {
+                    // 跨文件系统挂载等场景不支持原子移动，退化为普通替换（仍好过直接覆写目标文件）
+                    Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+                }
             }
         } catch (RuntimeException | IOException e) {
             log.warn("向量库持久化失败（内存索引仍在，重启后会丢失）: {} —— {}", path, e.getMessage());
+        } finally {
+            try {
+                Files.deleteIfExists(temp);
+            } catch (IOException ignored) {
+                // 临时文件清理失败不影响主流程，下次持久化会覆盖它
+            }
         }
     }
 }

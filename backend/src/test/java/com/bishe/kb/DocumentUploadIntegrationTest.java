@@ -134,6 +134,31 @@ class DocumentUploadIntegrationTest {
     }
 
     @Test
+    @DisplayName("重复上传同一文件：返回 4091，且不新增文档与切片；内容不同则允许")
+    void duplicateUploadShouldBeRejected() throws Exception {
+        byte[] content = buildChineseText(600).getBytes(StandardCharsets.UTF_8);
+        long firstId = uploadAndAwait(new MockMultipartFile(
+                "file", "去重测试.txt", "text/plain", content));
+
+        int documents = countRows("select count(*) from kb_document where deleted = 0");
+        int chunks = countRows("select count(*) from kb_chunk");
+
+        JsonNode duplicate = upload(new MockMultipartFile(
+                "file", "去重测试.txt", "text/plain", content));
+        assertThat(duplicate.get("code").asInt()).isEqualTo(4091);
+        assertThat(duplicate.get("message").asText()).contains("相同文件已入库");
+        assertThat(countRows("select count(*) from kb_document where deleted = 0")).isEqualTo(documents);
+        assertThat(countRows("select count(*) from kb_chunk")).isEqualTo(chunks);
+
+        // 标题与类型相同、内容不同：不是重复上传，必须放行
+        byte[] different = (buildChineseText(600) + "\n\n额外补充一段。").getBytes(StandardCharsets.UTF_8);
+        JsonNode accepted = upload(new MockMultipartFile(
+                "file", "去重测试.txt", "text/plain", different));
+        assertThat(accepted.get("code").asInt()).isZero();
+        assertThat(accepted.get("data").asLong()).isNotEqualTo(firstId);
+    }
+
+    @Test
     @DisplayName("上传 pdf：走 PDFBox 抽取正文并完成分块")
     void uploadPdfShouldExtractViaPdfBox() throws Exception {
         MockMultipartFile file = new MockMultipartFile("file", "smoke.pdf", "application/pdf", pdfBytes);
@@ -308,8 +333,12 @@ class DocumentUploadIntegrationTest {
         mockMvc.perform(delete("/api/documents/{id}", id)).andExpect(status().isOk());
     }
 
-    private JsonNode upload(MockMultipartFile file) throws Exception {
-        MvcResult result = mockMvc.perform(multipart("/api/documents/upload").file(file))
+    private int countRows(String sql) {
+        Integer count = jdbcTemplate.queryForObject(sql, Integer.class);
+        return count == null ? 0 : count;
+    }
+
+    private JsonNode upload(MockMultipartFile file) throws Exception {        MvcResult result = mockMvc.perform(multipart("/api/documents/upload").file(file))
                 .andExpect(status().isOk())
                 .andReturn();
         return MAPPER.readTree(result.getResponse().getContentAsString(StandardCharsets.UTF_8));

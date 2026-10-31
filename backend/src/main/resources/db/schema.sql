@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS kb_document
     file_type   VARCHAR(32)     NOT NULL COMMENT '文件类型：pdf/docx/md...',
     file_path   VARCHAR(512)             DEFAULT NULL COMMENT '落盘相对路径',
     file_size   BIGINT                   DEFAULT NULL COMMENT '文件字节数',
+    file_hash   CHAR(64)                 DEFAULT NULL COMMENT '上传文件 SHA-256，用于同空间同标题同类型去重',
     status      VARCHAR(32)     NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/PARSING/INDEXED/FAILED',
     chunk_count INT             NOT NULL DEFAULT 0 COMMENT '分段数量',
     error_msg   VARCHAR(500)             DEFAULT NULL COMMENT '失败原因',
@@ -91,7 +92,12 @@ CREATE TABLE IF NOT EXISTS kb_document
     KEY idx_doc_status (status),
     KEY idx_doc_title (title),
     KEY idx_doc_space (space_id),
-    KEY idx_doc_create_time (create_time)
+    KEY idx_doc_create_time (create_time),
+    KEY idx_doc_hash (space_id, title, file_hash),
+    KEY idx_doc_space_status (space_id, status),
+    KEY idx_doc_space_time (space_id, create_time),
+    KEY idx_doc_space_del_id (space_id, deleted, id),
+    KEY idx_doc_status_del_id (status, deleted, id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='知识库文档';
 
 -- 文档分段表（RAG 检索单元）
@@ -109,6 +115,9 @@ CREATE TABLE IF NOT EXISTS kb_chunk
     PRIMARY KEY (id),
     KEY idx_chunk_doc (document_id),
     KEY idx_chunk_enabled (enabled),
+    KEY idx_chunk_doc_enabled (document_id, enabled),
+    KEY idx_chunk_doc_index (document_id, chunk_index),
+    KEY idx_chunk_enabled_doc (enabled, document_id),
     FULLTEXT KEY ft_chunk_content (content) WITH PARSER ngram
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='文档分段';
 
@@ -123,7 +132,8 @@ CREATE TABLE IF NOT EXISTS chat_session
     deleted     TINYINT         NOT NULL DEFAULT 0 COMMENT '逻辑删除：0未删 1已删',
     PRIMARY KEY (id),
     KEY idx_session_update_time (update_time),
-    KEY idx_session_user (user_id)
+    KEY idx_session_user (user_id),
+    KEY idx_session_user_time (user_id, deleted, update_time, id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='聊天会话';
 
 -- 消息表：会话下的每一轮提问与回答（增量脚本见 db/migration/V2__chat_history.sql）
@@ -136,7 +146,10 @@ CREATE TABLE IF NOT EXISTS chat_message
     citations   TEXT                     DEFAULT NULL COMMENT '引用来源JSON数组，仅 assistant 有值',
     create_time DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     PRIMARY KEY (id),
-    KEY idx_message_session (session_id, id)
+    KEY idx_message_session (session_id, id),
+    KEY idx_message_session_role (session_id, `role`, id),
+    KEY idx_message_role_time (`role`, create_time, id),
+    KEY idx_message_role_id (`role`, id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='聊天消息';
 
 -- 问答反馈与纠偏工单表（建表见 db/migration/V6__feedback_and_template.sql，唯一键见 V7__security_hardening.sql）

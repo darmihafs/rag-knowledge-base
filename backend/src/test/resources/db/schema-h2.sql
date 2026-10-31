@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS kb_document
     file_type   VARCHAR(32)  NOT NULL,
     file_path   VARCHAR(512),
     file_size   BIGINT,
+    file_hash   VARCHAR(64),
     status      VARCHAR(32)  NOT NULL DEFAULT 'PENDING',
     chunk_count INT          NOT NULL DEFAULT 0,
     error_msg   VARCHAR(500),
@@ -78,6 +79,12 @@ CREATE TABLE IF NOT EXISTS kb_document
     update_time TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted     TINYINT      NOT NULL DEFAULT 0
 );
+
+CREATE INDEX IF NOT EXISTS idx_doc_hash ON kb_document (space_id, title, file_hash);
+CREATE INDEX IF NOT EXISTS idx_doc_space_status ON kb_document (space_id, status);
+CREATE INDEX IF NOT EXISTS idx_doc_space_time ON kb_document (space_id, create_time);
+CREATE INDEX IF NOT EXISTS idx_doc_space_del_id ON kb_document (space_id, deleted, id);
+CREATE INDEX IF NOT EXISTS idx_doc_status_del_id ON kb_document (status, deleted, id);
 
 CREATE TABLE IF NOT EXISTS kb_chunk
 (
@@ -94,6 +101,9 @@ CREATE TABLE IF NOT EXISTS kb_chunk
 
 CREATE INDEX IF NOT EXISTS idx_chunk_doc ON kb_chunk (document_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_enabled ON kb_chunk (enabled);
+CREATE INDEX IF NOT EXISTS idx_chunk_doc_enabled ON kb_chunk (document_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_chunk_doc_index ON kb_chunk (document_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_chunk_enabled_doc ON kb_chunk (enabled, document_id);
 
 CREATE TABLE IF NOT EXISTS chat_session
 (
@@ -106,6 +116,7 @@ CREATE TABLE IF NOT EXISTS chat_session
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_user ON chat_session (user_id);
+CREATE INDEX IF NOT EXISTS idx_session_user_time ON chat_session (user_id, deleted, update_time, id);
 
 CREATE TABLE IF NOT EXISTS chat_message
 (
@@ -118,6 +129,9 @@ CREATE TABLE IF NOT EXISTS chat_message
 );
 
 CREATE INDEX IF NOT EXISTS idx_message_session ON chat_message (session_id, id);
+CREATE INDEX IF NOT EXISTS idx_message_session_role ON chat_message (session_id, role, id);
+CREATE INDEX IF NOT EXISTS idx_message_role_time ON chat_message (role, create_time, id);
+CREATE INDEX IF NOT EXISTS idx_message_role_id ON chat_message (role, id);
 
 CREATE TABLE IF NOT EXISTS chat_feedback
 (

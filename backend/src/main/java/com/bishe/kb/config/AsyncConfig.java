@@ -29,8 +29,9 @@ public class AsyncConfig {
         executor.setQueueCapacity(100);
         executor.setKeepAliveSeconds(60);
         executor.setThreadNamePrefix("rag-sse-");
-        // 队列满时由调用线程执行，宁可让请求变慢也不丢问题
-        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        // 队列满时明确拒绝：调用方立即给前端回「请求过多」，绝不能用 CallerRunsPolicy
+        // 把一次几十秒的模型流式调用压回 Tomcat 请求线程——那会连带拖垮所有普通接口。
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(20);
         executor.initialize();

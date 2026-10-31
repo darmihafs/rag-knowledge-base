@@ -37,12 +37,16 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -131,12 +135,27 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
         if (StringUtils.isBlank(fileType) || !ALLOWED_TYPES.contains(fileType)) {
             throw new BizException("不支持的文件类型: " + fileType);
         }
+        String title = StringUtils.substringBeforeLast(originalName, ".");
+        // 内容哈希在落盘前算：同一文件双击 / 刷新上传时，别再生成一条重复文档和整套重复切片。
+        // 键包含标题与类型，允许用户把同一份内容以不同名称归档（例如中英文标题各留一份）。
+        String fileHash = sha256Hex(file);
+        KbDocument duplicate = getOne(new LambdaQueryWrapper<KbDocument>()
+                .eq(KbDocument::getSpaceId, targetSpaceId)
+                .eq(KbDocument::getTitle, title)
+                .eq(KbDocument::getFileType, fileType)
+                .eq(KbDocument::getFileHash, fileHash)
+                .last("limit 1"));
+        if (duplicate != null) {
+            throw new BizException(4091, "相同文件已入库（文档 id=" + duplicate.getId()
+                    + "），如需重建请使用「重新解析」");
+        }
 
         KbDocument doc = new KbDocument();
         doc.setSpaceId(targetSpaceId);
-        doc.setTitle(StringUtils.substringBeforeLast(originalName, "."));
+        doc.setTitle(title);
         doc.setFileType(fileType);
         doc.setFileSize(file.getSize());
+        doc.setFileHash(fileHash);
         doc.setStatus(KbDocument.Status.PENDING.name());
         doc.setChunkCount(0);
         save(doc);
@@ -277,14 +296,22 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
                 fail(doc, "原文文件缺失，无法解析");
                 return;
             }
-            String text = DocumentTextExtractor.extract(file, doc.getFileType());
+            // PDF 只遍历一次：既拿到整篇正文用于空内容判定，也拿到逐页文本用于页码定位。
+            // 之前「整篇 extract + 逐页 extractPdfPages」会把同一份 PDF 解析两遍，
+            // 大文件时 CPU 与堆内存都翻倍。
+            boolean pdf = "pdf".equalsIgnoreCase(doc.getFileType());
+            List<String> pdfPages = pdf ? DocumentTextExtractor.extractPdfPages(file) : List.of();
+            String text = pdf
+                    ? String.join("\n\n", pdfPages.stream().map(TextChunker::normalize).toList())
+                    : DocumentTextExtractor.extract(file, doc.getFileType());
             if (StringUtils.isBlank(text)) {
                 fail(doc, "未解析到文本内容，可能是扫描件或空文件");
                 return;
             }
 
-            // PDF 逐页切块并打上页码（供引用溯源 #page 跳转）；其余格式整篇切块、页码为空
-            List<PagedChunk> paged = chunkWithPages(file, doc.getFileType(), text,
+            // PDF 按整篇全局分块再按偏移映射页码：跨页段落能保持连续，不会被页边界硬切断；
+            // 其余格式整篇切块、页码为空。
+            List<PagedChunk> paged = chunkWithPages(pdf, pdfPages, text,
                     props.getChunkMaxChars(), props.getChunkOverlapChars());
             if (paged.isEmpty()) {
                 fail(doc, "分块结果为空");
@@ -298,6 +325,8 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
 
             // 状态与切片已经提交，向量化只是可降级的加速路径：这里单独兜底，
             // 即使实现意外抛出也不能走 fail() 去删已提交的切片。
+            // spaceId 随分段带进向量元数据，语义召回才能做空间前置过滤（旧数据靠回退兼容）。
+            savedChunks.forEach(chunk -> chunk.setSpaceId(doc.getSpaceId()));
             int indexed;
             try {
                 indexed = vectorIndexService.indexChunks(savedChunks);
@@ -305,6 +334,11 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
                 indexed = 0;
                 log.warn("向量化阶段异常，文档保持 INDEXED 并按词法检索 id={}: {}",
                         documentId, rootMessage(e));
+            }
+            // 向量路部分失败不能假装成功：文档仍算 INDEXED（词法可查），但把缺口写进 errorMsg，
+            // 前端状态标签的 tooltip 会提示“语义召回可能缺失”，管理员据此决定是否重新解析。
+            if (vectorIndexService.isEnabled() && indexed < savedChunks.size()) {
+                markVectorizationIncomplete(documentId, indexed, savedChunks.size());
             }
             int pageTagged = (int) paged.stream().filter(c -> c.pageNumber() != null).count();
             log.info("文档入库完成 id={} spaceId={} 分段数={} 带页码分段={} 向量化={} 正文字符={} 耗时={}ms",
@@ -532,31 +566,58 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
     }
 
     /**
-     * 页感知分块：PDF 逐页各自走 {@link TextChunker}，片段打上 1 基页码；
-     * 逐页切不出内容（如扫描件）或非 PDF 时，退回用整篇 {@code fullText} 分块、页码留空。
+     * 页感知分块。
      *
-     * <p>代价是 PDF 会被解析两次（整篇一次用于空文本判定，逐页一次用于定位），
-     * 换取「每个片段都落在确定的某一页」，前端点击引用即可精准 {@code #page} 跳转。
+     * <p>PDF 先把逐页文本拼成整篇、<b>全局</b>分块，再按每个切片在全文中的起始偏移映射到页码。
+     * 这样跨页的段落能自然延续（不再被页边界硬切断成两个语义半截），
+     * 同时每个切片仍带 1 基起始页码，前端点击引用可以精准 {@code #page} 跳转。
+     *
+     * <p>页码映射依赖「拼接口径」与「分块口径」一致：两边都先做 {@link TextChunker#normalize}，
+     * 再用 {@code "\n\n"} 连接。若直接拼原始页文本，空白压缩会让偏移整体错位，页码就会漂。
+     *
+     * <p>PDF 没切出内容（如扫描件）或非 PDF 时，退回整篇分块、页码留空。
      */
-    private List<PagedChunk> chunkWithPages(Path file, String fileType, String fullText,
+    private List<PagedChunk> chunkWithPages(boolean pdf, List<String> pdfPages, String fullText,
                                             int maxChars, int overlap) {
-        List<PagedChunk> result = new ArrayList<>();
-        if ("pdf".equalsIgnoreCase(fileType)) {
-            List<String> pageTexts = DocumentTextExtractor.extractPdfPages(file);
-            for (int p = 0; p < pageTexts.size(); p++) {
-                for (String chunk : TextChunker.chunk(pageTexts.get(p), maxChars, overlap)) {
-                    result.add(new PagedChunk(chunk, p + 1));
+        if (pdf && !pdfPages.isEmpty()) {
+            List<String> pages = pdfPages.stream().map(TextChunker::normalize).toList();
+            String joined = String.join("\n\n", pages);
+            List<Integer> pageStarts = new ArrayList<>(pages.size());
+            int offset = 0;
+            for (int i = 0; i < pages.size(); i++) {
+                pageStarts.add(offset);
+                offset += pages.get(i).length();
+                if (i < pages.size() - 1) {
+                    offset += 2;
                 }
+            }
+            List<PagedChunk> result = new ArrayList<>();
+            for (TextChunker.ChunkSlice slice : TextChunker.chunkWithOffsets(joined, maxChars, overlap)) {
+                result.add(new PagedChunk(slice.content(), pageAt(pageStarts, slice.startOffset())));
             }
             if (!result.isEmpty()) {
                 return result;
             }
             // 逐页没切出内容，走整篇兜底
         }
+        List<PagedChunk> result = new ArrayList<>();
         for (String chunk : TextChunker.chunk(fullText, maxChars, overlap)) {
             result.add(new PagedChunk(chunk, null));
         }
         return result;
+    }
+
+    /** 起始偏移落在哪一页（pageStarts 升序，返回 1 基页码） */
+    private static int pageAt(List<Integer> pageStarts, int offset) {
+        int page = 1;
+        for (int i = 0; i < pageStarts.size(); i++) {
+            if (pageStarts.get(i) <= offset) {
+                page = i + 1;
+            } else {
+                break;
+            }
+        }
+        return page;
     }
 
     /** 带页码的分段：pageNumber 为 null 表示该来源无稳定页码（非 PDF / 兜底路径） */
@@ -600,6 +661,24 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
         }
     }
 
+    /**
+     * 向量化只完成了一部分：文档仍是 INDEXED（词法检索可用），但把缺口写进 errorMsg，
+     * 让「已入库」不再是一个假成功。条件带 status=INDEXED，避免覆盖并发删除/失败状态。
+     */
+    private void markVectorizationIncomplete(Long documentId, int indexed, int total) {
+        try {
+            baseMapper.update(null, new LambdaUpdateWrapper<KbDocument>()
+                    .eq(KbDocument::getId, documentId)
+                    .eq(KbDocument::getStatus, KbDocument.Status.INDEXED.name())
+                    .set(KbDocument::getErrorMsg, StringUtils.abbreviate(
+                            "向量化仅完成 " + indexed + "/" + total
+                                    + " 条，语义召回可能缺失；词法检索不受影响，可重新解析", 500)));
+            log.warn("向量化未完成 id={} {}/{}，已写入提示并保持 INDEXED", documentId, indexed, total);
+        } catch (RuntimeException e) {
+            log.warn("写入向量化缺口提示失败 id={}: {}", documentId, e.getMessage());
+        }
+    }
+
     private DocumentVO toVo(KbDocument doc) {
         return new DocumentVO(doc.getId(), doc.getSpaceId(), doc.getTitle(), doc.getFileType(), doc.getFileSize(),
                 doc.getStatus(), doc.getChunkCount(),
@@ -625,5 +704,21 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
                 .resolve(String.valueOf(documentId))
                 .resolve(LocalDate.now().format(DIR_FORMAT))
                 .resolve(UUID.randomUUID().toString().replace("-", "") + "." + fileType);
+    }
+
+    /** 流式计算 SHA-256，不把整份文件读进堆内存 */
+    private static String sha256Hex(MultipartFile file) {
+        try (InputStream in = file.getInputStream()) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (IOException | NoSuchAlgorithmException e) {
+            log.error("计算上传文件摘要失败: {}", file.getOriginalFilename(), e);
+            throw new BizException(5002, "计算文件摘要失败，请重新上传");
+        }
     }
 }

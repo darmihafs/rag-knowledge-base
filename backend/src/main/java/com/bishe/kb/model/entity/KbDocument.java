@@ -38,6 +38,14 @@ public class KbDocument {
 
     private Long fileSize;
 
+    /**
+     * 上传文件 SHA-256（十六进制）。
+     *
+     * <p>用于识别「同一空间、同标题、同类型、同内容」的重复上传；历史数据为空，
+     * 不参与去重，也不影响预览与检索。
+     */
+    private String fileHash;
+
     /** 处理状态机：待解析 -> 解析中 -> 已索引 / 失败，取值见 {@link Status} */
     private String status;
 

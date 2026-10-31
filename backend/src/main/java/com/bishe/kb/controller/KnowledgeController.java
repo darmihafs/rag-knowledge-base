@@ -71,13 +71,8 @@ public class KnowledgeController {
         response.setHeader("Cache-Control", "no-cache");
 
         SseEmitter emitter = new SseEmitter(STREAM_TIMEOUT_MILLIS);
-        emitter.onTimeout(() -> {
-            log.warn("SSE 超时结束 question={}", request.question());
-            emitter.complete();
-        });
-        emitter.onError(e -> log.debug("SSE 连接异常（多为前端主动取消）: {}", e.getMessage()));
-        emitter.onCompletion(() -> log.debug("SSE 连接关闭 question={}", request.question()));
-
+        // 超时 / 异常 / 完成回调统一由 RagAnswerServiceImpl 注册：
+        // 它要在断连时置协作取消标记，避免把半截回答写进会话历史，这里不再重复注册覆盖它。
         answerService.askStream(request, emitter);
         return emitter;
     }

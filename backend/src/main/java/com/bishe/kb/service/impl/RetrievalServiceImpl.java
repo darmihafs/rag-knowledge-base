@@ -73,7 +73,7 @@ public class RetrievalServiceImpl implements RetrievalService {
             // 纯语义：只有分段 ID，需要回表并按名次重排
             case SEMANTIC -> loadRanked(
                     vectorIndexService.searchChunkIds(question,
-                            semanticLimit(effective, topK)), effective);
+                            semanticLimit(effective, topK), effective), effective);
             case HYBRID -> hybridRetrieve(question, topK, effective);
         };
     }
@@ -92,7 +92,7 @@ public class RetrievalServiceImpl implements RetrievalService {
                 .toList();
         // 未启用/异常时语义路为空列表，融合会自动退化成纯词法
         List<Long> semanticIds =
-                vectorIndexService.searchChunkIds(question, semanticLimit(scope, candidateK));
+                vectorIndexService.searchChunkIds(question, semanticLimit(scope, candidateK), scope);
 
         List<Long> fusedIds = rrfFuse(lexicalIds, semanticIds, topK);
         if (fusedIds.isEmpty()) {
@@ -236,7 +236,13 @@ public class RetrievalServiceImpl implements RetrievalService {
         if (scope.spaceId() != null) {
             return "select id from kb_document where space_id = " + scope.spaceId() + " and deleted = 0";
         }
-        String joined = scope.visibleSpaceIds().stream()
+        List<Long> visible = scope.visibleSpaceIds();
+        if (visible == null || visible.isEmpty()) {
+            // 空集合拼出 in () 是语法错误；真正的空授权在 retrieve 入口已被 deniesEverything 挡掉，
+            // 这里再兜一层「永远不命中」，保证任何内部调用方都不会意外退化成全库。
+            return "select id from kb_document where 1 = 0";
+        }
+        String joined = visible.stream()
                 .map(String::valueOf)
                 .collect(Collectors.joining(","));
         return "select id from kb_document where space_id in (" + joined + ") and deleted = 0";

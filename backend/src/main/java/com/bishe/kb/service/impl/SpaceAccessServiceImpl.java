@@ -19,6 +19,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
@@ -127,6 +128,7 @@ public class SpaceAccessServiceImpl implements SpaceAccessService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public int grant(Long spaceId, List<Long> userIds) {
         KbSpace space = requireExistingSpace(spaceId);
         List<Long> distinct = distinctUserIds(userIds);

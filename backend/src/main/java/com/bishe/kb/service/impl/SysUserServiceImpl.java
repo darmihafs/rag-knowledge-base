@@ -14,6 +14,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 用户服务实现。
@@ -53,7 +54,12 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
         return user;
     }
 
+    /**
+     * 注册与默认空间授权必须同进同退：成员行插入失败时账号不能留下，
+     * 否则这个用户登录后「可见空间为空」，问什么都是空的，却没有任何失败提示。
+     */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public SysUser register(RegisterRequest request) {
         String username = request.username().trim();
         if (findByUsername(username) != null) {
