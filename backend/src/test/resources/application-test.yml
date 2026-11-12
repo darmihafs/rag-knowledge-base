@@ -33,6 +33,11 @@ rag:
   embedding-store-path: ./target/test-embedding-store.json
   # H2 没有 MATCH ... AGAINST 与 ngram 解析器，测试与评测跑批一律走 LIKE 兜底分支
   lexical-mode: like
+  # Rerank 精排在测试里统一关闭：不少集成测试会注入占位密钥 "test-key-not-real"，
+  # 精排开着就会拿占位密钥发真实 HTTP 请求（401 后降级），测试虽绿但不再零外网依赖。
+  # 评测跑批（RetrievalBenchmarkTest）在运行时显式 setEnabled(true) 打开消融臂，不受此处影响。
+  rerank:
+    enabled: false
 
 # 认证：测试环境放行「无 token」请求并注入管理员身份，让第七阶段之前写下的旧集成测试保持全绿。
 # 新增的 AuthIntegrationTest 会显式带 token（或用 auth.test-bypass=false 的独立上下文）来验证 401/403/隔离。
@@ -40,6 +45,13 @@ auth:
   secret: kb-rag-test-jwt-secret-0123456789-abcdefghijklmnopqrstuvwxyz
   expire-minutes: 720
   test-bypass: true
+
+# 分布式缓存与锁：测试环境一律关闭，不装配 RedisCacheService。
+# Query 向量退回 Caffeine L1、鉴权/空间集合每次查库、Agent 并发退回进程内闸门——
+# 全部单测与 H2 集成测试因此无需启动真实 Redis，也不依赖任何外网。
+kb:
+  cache:
+    enabled: false
 
 logging:
   level:

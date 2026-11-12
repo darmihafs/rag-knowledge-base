@@ -10,6 +10,7 @@ import com.bishe.kb.model.vo.RetrieveCompareVO;
 import com.bishe.kb.service.KbSpaceService;
 import com.bishe.kb.service.RetrievalCompareService;
 import com.bishe.kb.service.RetrievalService;
+import com.bishe.kb.service.VectorStoreEngine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -40,16 +41,17 @@ public class RetrievalCompareServiceImpl implements RetrievalCompareService {
     private static final int MAX_TOP_K = 20;
 
     private final RetrievalService retrievalService;
-    private final VectorIndexService vectorIndexService;
+    private final VectorStoreEngine vectorStoreEngine;
     private final KbDocumentMapper documentMapper;
     private final KbSpaceService spaceService;
     private final RagProperties props;
+    private final DashScopeRerankClient rerankClient;
 
     @Override
     public RetrieveCompareVO compare(RetrieveCompareRequest request) {
         int topK = resolveTopK(request.topK());
         String question = request.question().trim();
-        boolean vectorAvailable = vectorIndexService.isEnabled();
+        boolean vectorAvailable = vectorStoreEngine.isEnabled();
         Long spaceId = normalizeSpace(request.spaceId());
 
         List<TimedRoute> runs = List.of(
@@ -120,8 +122,23 @@ public class RetrievalCompareServiceImpl implements RetrievalCompareService {
         return new RetrieveCompareVO.Engine(props.getRrfK(), props.getEmbeddingModel(), vectorAvailable,
                 lexicalStrategy(),
                 "问题向量化后在向量库做余弦相似度检索，按分数降序",
-                "两路各取 2×topK 候选，用 RRF Σ1/(k+rank) 融合去重后回表重排",
+                hybridStrategy(),
                 scopeStrategy(spaceId));
+    }
+
+    /**
+     * 混合路的口径说明：必须跟着精排开关走。
+     *
+     * <p>检索实验室把这行原样显示给评审看，实际链路带 gte-rerank 精排而页面只写 RRF，等于页面在骗人。
+     */
+    private String hybridStrategy() {
+        String base = "两路各取 2×topK 候选，用 RRF Σ1/(k+rank) 融合去重后回表重排";
+        if (!rerankClient.isAvailable()) {
+            return base;
+        }
+        RagProperties.Rerank cfg = props.getRerank();
+        return base + "，再送 " + cfg.getModel() + " 精排（粗排取 " + cfg.getCandidates()
+                + " 条候选，精排后保留 min(topK, " + cfg.getTopN() + ") 条；超时/报错自动回退粗排结果）";
     }
 
     /**
@@ -158,7 +175,11 @@ public class RetrievalCompareServiceImpl implements RetrievalCompareService {
                     ? "纯词法：不做语义理解，靠 ngram 全文索引的字面命中与相关度排序，取前 " + topK + " 条"
                     : "纯词法：不做语义理解，靠字面 2-gram 命中，取前 " + topK + " 条";
             case SEMANTIC -> "纯语义：只看向量相似度，同义改写也能命中，取前 " + topK + " 条";
-            case HYBRID -> "混合双路 + RRF(k=" + props.getRrfK() + ")：两路候选融合去重，取前 " + topK + " 条";
+            case HYBRID -> rerankClient.isAvailable()
+                    ? "混合双路 + RRF(k=" + props.getRrfK() + ") + " + props.getRerank().getModel()
+                            + " 精排：粗排候选融合去重后 Cross-Encoder 重排，取前 "
+                            + Math.min(topK, props.getRerank().getTopN()) + " 条"
+                    : "混合双路 + RRF(k=" + props.getRrfK() + ")：两路候选融合去重，取前 " + topK + " 条";
         };
     }
 
@@ -166,7 +187,8 @@ public class RetrievalCompareServiceImpl implements RetrievalCompareService {
         return switch (route) {
             case LEXICAL -> props.isFulltextLexical() ? "纯词法（FULLTEXT ngram）" : "纯词法（2-gram LIKE）";
             case SEMANTIC -> "纯语义向量";
-            case HYBRID -> "混合双路 + RRF";
+            case HYBRID -> rerankClient.isAvailable()
+                    ? "混合双路 + RRF + Rerank" : "混合双路 + RRF";
         };
     }
 

@@ -9,6 +9,8 @@ import com.bishe.kb.mapper.KbChunkMapper;
 import com.bishe.kb.model.entity.KbChunk;
 import com.bishe.kb.service.RetrievalService;
 import com.bishe.kb.service.RetrievalService.Route;
+import com.bishe.kb.service.impl.DashScopeRerankClient;
+import com.bishe.kb.service.impl.RerankRetrievalService;
 import com.bishe.kb.service.impl.VectorIndexService;
 import com.bishe.kb.util.TextChunker;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
@@ -46,7 +48,7 @@ import java.util.TreeSet;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RAG 检索评测跑批：实验一「检索策略消融」+ 实验二「切片窗口敏感度」，
+ * RAG 检索评测跑批：实验一「检索策略消融」（含 RRF + gte-rerank 精排附加臂）+ 实验二「切片窗口敏感度」，
  * 输出 Hit Rate@1/3/5、MRR、平均/P95 耗时与论文表格、CSV。
  *
  * <p>三条设计约束，直接决定这些数据能不能写进论文：
@@ -71,10 +73,14 @@ class RetrievalBenchmarkTest {
 
     private static final String EXPERIMENT_1 = "experiment1_ablation";
     private static final String EXPERIMENT_2 = "experiment2_chunk_sensitivity";
+    /** 精排附加臂的策略标签：与基线 HYBRID 区分，报告 writer 按显式策略名过滤，互不污染 */
+    private static final String STRATEGY_RERANK = "HYBRID_RERANK";
     /** 评测窗口：三档 Hit@K 与 MRR 都在这段候选内计算 */
     private static final int EVAL_WINDOW = 10;
     /** Top-N 平均字数统计口径，N 取生产召回名额 */
     private static final int PROMPT_COST_K = 5;
+    /** 精排臂逐题间隔：真实 rerank 接口有 RPM 限流，轻量 pacing 避免连发触发 429（不计入检索耗时） */
+    private static final long RERANK_PACING_MILLIS = 300;
     private static final int DOC_ID_BASE = 9000;
     private static final int CHUNK_ID_BASE = 90000;
     private static final List<Route> ROUTES = List.of(Route.LEXICAL, Route.SEMANTIC, Route.HYBRID);
@@ -86,8 +92,14 @@ class RetrievalBenchmarkTest {
     private JdbcTemplate jdbc;
     @Autowired
     private RagProperties props;
+    /** 注入的是 @Primary 的 RerankRetrievalService 装饰器：精排关闭时透传 RetrievalServiceImpl，与旧链路一致 */
     @Autowired
     private RetrievalService retrievalService;
+    @Autowired
+    private DashScopeRerankClient rerankClient;
+    /** 与 retrievalService 是同一个 @Primary Bean，按具体类型注入只为读降级计数器 */
+    @Autowired
+    private RerankRetrievalService rerankPipeline;
     @Autowired
     private VectorIndexService vectorIndexService;
     @Autowired
@@ -105,6 +117,13 @@ class RetrievalBenchmarkTest {
      * 二是计算字面重合度时以真正入库的文本为准，而不是原始语料。
      */
     private List<String> currentChunkContents = List.of();
+
+    /**
+     * 精排臂「降级题数」：本批精排调用中触发 catch 回退粗排的次数。
+     * 用装饰器降级计数器在精排臂前后做差得到，写进报告环境表，
+     * 让「精排收益」结论有据可查——全降级时不能据此论证精排有效。
+     */
+    private int rerankDegradedCount = 0;
 
     /**
      * 真实向量模型 Bean：{@code rag.embedding-enabled=false} 时主配置不注册该 Bean，
@@ -164,6 +183,9 @@ class RetrievalBenchmarkTest {
         props.setEmbeddingEnabled(true);
         props.setMockEnabled(false);
         props.setEmbeddingStorePath("./target/benchmark-embedding-store.json");
+        // 基线臂统一关闭精排：LEXICAL / SEMANTIC / HYBRID 三条策略必须保持「纯」，
+        // 带精排的生产流水线在下面附加臂单独测，两组数据互不污染
+        props.getRerank().setEnabled(false);
 
         long startedAt = System.currentTimeMillis();
         List<QueryRow> rawRows = new ArrayList<>();
@@ -182,6 +204,28 @@ class RetrievalBenchmarkTest {
                 ablation.add(aggregate(EXPERIMENT_1, "natural", route, cases, category));
             }
         }
+
+        // ---------------- 实验一附加臂：RRF 粗排 + gte-rerank 精排（生产流水线）
+        // top-n 设为评测窗口：精排臂与基线臂同样返回 Top-10，Hit@K / MRR 才是同窗口公平对比
+        props.getRerank().setEnabled(true);
+        props.getRerank().setTopN(EVAL_WINDOW);
+        assertThat(rerankClient.isAvailable())
+                .as("Rerank 消融臂需要真实 API Key 且 rag.rerank.enabled=true")
+                .isTrue();
+        warmUpRerank(queryFile.queries());
+        // 预热也可能触发降级，基线计数必须在预热之后取，差值才只统计正式跑批的题
+        long fallbackBefore = rerankPipeline.fallbackCount();
+        List<Case> rerankCases = runRound(EXPERIMENT_1, "natural", STRATEGY_RERANK, Route.HYBRID,
+                queryFile.queries(), corpus, RERANK_PACING_MILLIS);
+        rerankDegradedCount = (int) (rerankPipeline.fallbackCount() - fallbackBefore);
+        System.out.printf("[benchmark] 精排臂降级题数：%d / %d%n", rerankDegradedCount, queryFile.queries().size());
+        rawRows.addAll(toQueryRows(EXPERIMENT_1, "natural", STRATEGY_RERANK, rerankCases));
+        for (String category : List.of("ALL", "A", "B", "C")) {
+            ablation.add(aggregate(EXPERIMENT_1, "natural", STRATEGY_RERANK, rerankStrategyName(),
+                    rerankCases, category));
+        }
+        // 实验二（切片敏感度）保持基线流水线，隔离「粒度」这一个变量
+        props.getRerank().setEnabled(false);
 
         // ---------------- 实验二：切片窗口大小敏感度
         List<MetricRow> sensitivity = new ArrayList<>();
@@ -227,15 +271,36 @@ class RetrievalBenchmarkTest {
 
     // ------------------------------------------------------------------ 跑批内核
 
-    /** 一轮实验：同一份语料 + 一个检索路由，把全部问题各检索一次 */
+    /** 一轮实验：同一份语料 + 一个检索路由，把全部问题各检索一次（基线臂无 pacing） */
     private List<Case> runRound(String experiment, String config, Route route,
                                List<Query> queries, CorpusFile corpus) {
-        System.out.printf("[benchmark] %s / %s / %s 开始%n", experiment, config, route);
+        return runRound(experiment, config, route.name(), route, queries, corpus, 0);
+    }
+
+    /**
+     * 带策略标签的一轮：精排附加臂复用 HYBRID 路由，但报告里要用不同标签与基线区分。
+     * pacingMillis 是逐题之间的额外间隔（精排臂防限流用），在计时窗口之外，不污染耗时指标。
+     */
+    private List<Case> runRound(String experiment, String config, String label, Route route,
+                               List<Query> queries, CorpusFile corpus, long pacingMillis) {
+        System.out.printf("[benchmark] %s / %s / %s 开始%n", experiment, config, label);
         List<Case> cases = new ArrayList<>(queries.size());
         for (Query query : queries) {
+            if (pacingMillis > 0 && !cases.isEmpty()) {
+                sleepBetweenQueries(pacingMillis);
+            }
             cases.add(retrieveOnce(query, route, corpus));
         }
         return cases;
+    }
+
+    private static void sleepBetweenQueries(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("评测跑批被中断", e);
+        }
     }
 
     private Case retrieveOnce(Query query, Route route, CorpusFile corpus) {
@@ -271,8 +336,21 @@ class RetrievalBenchmarkTest {
         }
     }
 
+    /** 精排臂预热：rerank 的 TLS 握手与 JIT 需要几次真实调用才稳定，否则首题耗时会被计进 P95 */
+    private void warmUpRerank(List<Query> queries) {
+        for (Query query : queries.subList(0, Math.min(2, queries.size()))) {
+            retrievalService.retrieve(query.question(), EVAL_WINDOW, Route.HYBRID);
+        }
+    }
+
     /** 指标聚合：Hit@K 与 MRR 的分母只算「证据在该粒度下仍可判定」的题数 */
     private MetricRow aggregate(String experiment, String config, Route route,
+                                List<Case> cases, String category) {
+        return aggregate(experiment, config, route.name(), strategyName(route), cases, category);
+    }
+
+    /** 带策略标签的聚合：精排附加臂与基线臂共用同一套口径，只有标签不同 */
+    private MetricRow aggregate(String experiment, String config, String strategy, String strategyCn,
                                 List<Case> cases, String category) {
         List<Case> scoped = "ALL".equals(category)
                 ? cases
@@ -291,7 +369,7 @@ class RetrievalBenchmarkTest {
                 .mapToInt(Case::topChars).average().orElse(0);
         double avgOverlap = scoped.stream().mapToDouble(Case::overlap).average().orElse(0);
 
-        return new MetricRow(experiment, config, route.name(), strategyName(route), category,
+        return new MetricRow(experiment, config, strategy, strategyCn, category,
                 scoped.size(), answerable.size(), hit1, hit3, hit5, mrr,
                 avgLatency, p95, avgTopChars, avgOverlap);
     }
@@ -318,6 +396,11 @@ class RetrievalBenchmarkTest {
             case SEMANTIC -> "纯语义向量";
             case HYBRID -> "混合双路 + RRF(k=60)";
         };
+    }
+
+    /** 精排臂标签：模型名与 RRF 常数都取运行时配置，报告与配置永远一致 */
+    private String rerankStrategyName() {
+        return "混合双路 + RRF(k=" + props.getRrfK() + ") + " + props.getRerank().getModel() + " 精排";
     }
 
     // ------------------------------------------------------------------ 语料装载
@@ -504,8 +587,12 @@ class RetrievalBenchmarkTest {
     }
 
     private List<QueryRow> toQueryRows(String experiment, String config, Route route, List<Case> cases) {
+        return toQueryRows(experiment, config, route.name(), cases);
+    }
+
+    private List<QueryRow> toQueryRows(String experiment, String config, String strategy, List<Case> cases) {
         return cases.stream()
-                .map(c -> new QueryRow(experiment, config, route.name(), c.query().id(), c.query().category(),
+                .map(c -> new QueryRow(experiment, config, strategy, c.query().id(), c.query().category(),
                         c.query().question(), c.query().targetSection(), c.query().evidence(),
                         c.rank(), c.rank() != null && c.rank() <= PROMPT_COST_K, c.latencyMillis(),
                         c.overlap(), c.evidencePresent()))
@@ -522,8 +609,13 @@ class RetrievalBenchmarkTest {
         map.put("生成侧配置", "未调用大模型，本实验只评测召回阶段");
         map.put("向量模型", settings.embeddingModel() + "（" + props.getBaseUrl() + "）");
         map.put("向量库实现", "InMemoryEmbeddingStore + 本地 JSON 序列化（一期方案）");
-        map.put("召回代码", "RetrievalServiceImpl，与线上问答完全一致");
+        map.put("召回代码", "RerankRetrievalService 装饰器 → RetrievalServiceImpl，与线上问答完全一致");
         map.put("RRF 常数 k", String.valueOf(props.getRrfK()));
+        map.put("Rerank 精排", props.getRerank().getModel() + "（百炼原生 text-rerank 端点；粗排候选 "
+                + props.getRerank().getCandidates() + " 条、超时 " + props.getRerank().getTimeoutSeconds()
+                + "s；消融臂 top-n=" + EVAL_WINDOW + " 与基线同窗口，基线臂关闭精排）");
+        // 纯数字：writer 的 intOf 会剥掉非数字字符，"3 / 92" 会被解析成 392
+        map.put("精排臂降级题数", String.valueOf(rerankDegradedCount));
         map.put("评测窗口 K", String.valueOf(EVAL_WINDOW));
         map.put("Prompt 成本口径", "Top-" + settings.productionTopK() + " 平均字符数"
                 + "（取自 application.yml 的生产召回名额 top-k=" + settings.productionTopK()

@@ -7,6 +7,7 @@ import com.bishe.kb.mapper.KbChunkMapper;
 import com.bishe.kb.model.entity.KbChunk;
 import com.bishe.kb.service.RetrievalService;
 import com.bishe.kb.service.RetrievalScope;
+import com.bishe.kb.service.VectorStoreEngine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -29,7 +30,7 @@ import java.util.stream.Collectors;
  * <ol>
  *   <li>路一 · 词法召回：{@link #lexicalRetrieve} 默认走 MySQL FULLTEXT ngram 索引打分
  *       （{@code rag.lexical-mode=like} 时退回逐词 LIKE），擅长精确关键词/专有名词；</li>
- *   <li>路二 · 语义召回：{@link VectorIndexService#searchChunkIds} 的向量余弦相似，擅长同义/近义表达
+ *   <li>路二 · 语义召回：{@link VectorStoreEngine#searchChunkIds} 的向量余弦相似，擅长同义/近义表达
  *       （字面无重叠也能命中）；向量不可用时该路返回空，自动退化为纯词法。</li>
  *   <li>用 RRF（倒数排名融合）合并两路排名、去重，取最终 topK 回表加载分段正文。</li>
  * </ol>
@@ -51,7 +52,7 @@ public class RetrievalServiceImpl implements RetrievalService {
     private static final int SCOPED_SEMANTIC_FACTOR = 3;
 
     private final KbChunkMapper chunkMapper;
-    private final VectorIndexService vectorIndexService;
+    private final VectorStoreEngine vectorStoreEngine;
     private final RagProperties props;
 
     @Override
@@ -72,7 +73,7 @@ public class RetrievalServiceImpl implements RetrievalService {
             case LEXICAL -> lexicalRetrieve(question, topK, effective);
             // 纯语义：只有分段 ID，需要回表并按名次重排
             case SEMANTIC -> loadRanked(
-                    vectorIndexService.searchChunkIds(question,
+                    vectorStoreEngine.searchChunkIds(question,
                             semanticLimit(effective, topK), effective), effective);
             case HYBRID -> hybridRetrieve(question, topK, effective);
         };
@@ -92,7 +93,7 @@ public class RetrievalServiceImpl implements RetrievalService {
                 .toList();
         // 未启用/异常时语义路为空列表，融合会自动退化成纯词法
         List<Long> semanticIds =
-                vectorIndexService.searchChunkIds(question, semanticLimit(scope, candidateK), scope);
+                vectorStoreEngine.searchChunkIds(question, semanticLimit(scope, candidateK), scope);
 
         List<Long> fusedIds = rrfFuse(lexicalIds, semanticIds, topK);
         if (fusedIds.isEmpty()) {

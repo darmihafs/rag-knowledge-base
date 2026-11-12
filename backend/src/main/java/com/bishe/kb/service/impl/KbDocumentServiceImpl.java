@@ -20,6 +20,7 @@ import com.bishe.kb.security.UserContext;
 import com.bishe.kb.service.KbDocumentService;
 import com.bishe.kb.service.KbSpaceService;
 import com.bishe.kb.service.SpaceAccessService;
+import com.bishe.kb.service.VectorStoreEngine;
 import com.bishe.kb.util.AfterCommitRunner;
 import com.bishe.kb.util.DocumentTextExtractor;
 import com.bishe.kb.util.TextChunker;
@@ -59,7 +60,7 @@ import java.util.UUID;
  * {@code INDEXED}（可检索）或 {@code FAILED}（带 errorMsg，可重试）。
  * 状态切换全部用「WHERE status = 期望值」的条件更新完成，天然挡住重复任务与「解析途中被删除」的竞态。
  *
- * <p>向量化由 {@link VectorIndexService} 承担，内部按 {@code rag.embedding-enabled} 决定是否真正调接口，
+ * <p>向量化由 {@link VectorStoreEngine} 承担，内部按 {@code rag.embedding-enabled} 决定是否真正调接口，
  * 且失败只告警不抛异常——即便向量服务不可用，文档仍会正常入库并支持词法检索。
  */
 @Slf4j
@@ -81,7 +82,7 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
 
     private final KbChunkMapper chunkMapper;
     private final RagProperties props;
-    private final VectorIndexService vectorIndexService;
+    private final VectorStoreEngine vectorStoreEngine;
     private final KbSpaceService spaceService;
     private final SpaceAccessService spaceAccessService;
     private final PlatformTransactionManager transactionManager;
@@ -232,7 +233,7 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
         }
 
         // 旧切片已从库里删除，向量库里的旧条目也要清掉；失败只告警，不阻断重新解析
-        vectorIndexService.removeDocument(documentId);
+        vectorStoreEngine.removeDocument(documentId);
         doc.setStatus(KbDocument.Status.PENDING.name());
         if (!tryEnqueue(documentId)) {
             fail(doc, "解析队列已满，任务未开始执行");
@@ -329,7 +330,7 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
             savedChunks.forEach(chunk -> chunk.setSpaceId(doc.getSpaceId()));
             int indexed;
             try {
-                indexed = vectorIndexService.indexChunks(savedChunks);
+                indexed = vectorStoreEngine.indexChunks(savedChunks);
             } catch (RuntimeException e) {
                 indexed = 0;
                 log.warn("向量化阶段异常，文档保持 INDEXED 并按词法检索 id={}: {}",
@@ -337,7 +338,7 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
             }
             // 向量路部分失败不能假装成功：文档仍算 INDEXED（词法可查），但把缺口写进 errorMsg，
             // 前端状态标签的 tooltip 会提示“语义召回可能缺失”，管理员据此决定是否重新解析。
-            if (vectorIndexService.isEnabled() && indexed < savedChunks.size()) {
+            if (vectorStoreEngine.isEnabled() && indexed < savedChunks.size()) {
                 markVectorizationIncomplete(documentId, indexed, savedChunks.size());
             }
             int pageTagged = (int) paged.stream().filter(c -> c.pageNumber() != null).count();
@@ -398,7 +399,7 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
         spaceService.recount(doc.getSpaceId());
         // 磁盘文件与向量库都不是事务资源：留到 afterCommit，事务回滚时不会把还在库里的文档原文删没
         AfterCommitRunner.run(() -> {
-            vectorIndexService.removeDocument(documentId);
+            vectorStoreEngine.removeDocument(documentId);
             deletePhysicalFile(doc);
         });
     }

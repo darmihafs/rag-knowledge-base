@@ -1,6 +1,6 @@
 package com.bishe.kb.config;
 
-import com.bishe.kb.service.impl.VectorIndexService;
+import com.bishe.kb.service.VectorStoreEngine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -27,18 +27,18 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class EmbeddingWarmUpRunner {
 
-    private final VectorIndexService vectorIndexService;
+    private final VectorStoreEngine vectorStoreEngine;
 
     @EventListener(ApplicationReadyEvent.class)
     public void warmUpAsync() {
-        if (!vectorIndexService.isEnabled()) {
+        if (!vectorStoreEngine.isEnabled()) {
             log.info("跳过向量链路预热：rag.embedding-enabled=false 或向量模型未装配，问答走词法检索");
             return;
         }
         // 一次性的阻塞外网调用用虚拟线程：不建线程、不进队列，跑完自然结束
         Thread.ofVirtual().name("rag-embedding-warmup-").start(() -> {
             try {
-                log.info("向量链路预热 {}", vectorIndexService.warmUp());
+                log.info("向量链路预热 {}", vectorStoreEngine.warmUp());
             } catch (RuntimeException e) {
                 log.warn("向量链路预热异常（不影响启动，问答自动退化为词法检索）: {}", e.getMessage());
             }

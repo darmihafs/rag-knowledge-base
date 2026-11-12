@@ -1,8 +1,11 @@
 package com.bishe.kb.security;
 
+import com.bishe.kb.cache.CacheKeys;
+import com.bishe.kb.cache.RedisCacheService;
 import com.bishe.kb.common.BizException;
 import com.bishe.kb.common.Result;
 import com.bishe.kb.config.AuthProperties;
+import com.bishe.kb.config.KbCacheProperties;
 import com.bishe.kb.model.entity.SysUser;
 import com.bishe.kb.service.SysUserService;
 import com.bishe.kb.util.JwtUtil;
@@ -12,6 +15,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
@@ -20,6 +24,7 @@ import org.springframework.web.servlet.HandlerInterceptor;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Set;
 
 /**
@@ -94,6 +99,9 @@ public class AuthInterceptor implements HandlerInterceptor {
     private final SysUserService userService;
     private final AuthProperties authProperties;
     private final ObjectMapper objectMapper;
+    /** Redis 缓存可选注入：关闭时拿到 null，吊销校验完全回退到每次查库（与升级前一致） */
+    private final ObjectProvider<RedisCacheService> redisCacheProvider;
+    private final KbCacheProperties cacheProperties;
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler)
@@ -130,21 +138,42 @@ public class AuthInterceptor implements HandlerInterceptor {
             return false;
         }
 
-        // 回表确认账号仍存在且启用，让「禁用 / 删除」能即时生效（JWT 本身无法主动作废）
+        // Redis 吊销快速短路：缓存里的版本号比 token 携带的新，说明该 token 必已被吊销
+        // （改密 / 重置 / 退出），直接拒绝、不必查库。只在「token 版本 < 缓存版本」时拒绝——
+        // 缓存若陈旧到比 token 版本还小，则放行去查库复核，避免误拒新签发的 token。
+        // Redis 不可用时 get 返回 null，本段自动跳过，接受路径始终以数据库为准。
+        RedisCacheService redis = redisCacheProvider.getIfAvailable();
+        if (redis != null) {
+            Integer cachedVersion = readCachedTokenVersion(redis, loginUser.id());
+            if (cachedVersion != null && loginUser.tokenVersion() < cachedVersion) {
+                writeError(response, HttpServletResponse.SC_UNAUTHORIZED, 4012, "登录状态已变更，请重新登录");
+                return false;
+            }
+        }
+
+        // 回表确认账号仍存在且启用，让「禁用 / 删除」能即时生效（JWT 本身无法主动作废）。
+        // 启用状态 / 角色 / 昵称刻意不缓存：必须每次查库复核，提权与禁用才能即时生效。
         SysUser dbUser = userService.findByUsername(loginUser.username());
         if (dbUser == null || !dbUser.isEnabled()) {
             writeError(response, HttpServletResponse.SC_UNAUTHORIZED, 4010, "账号不可用，请重新登录");
             return false;
         }
+        int currentVersion = dbUser.tokenVersionOrDefault();
+        // 把库里的最新版本号回填缓存（尽力而为）：即便本次因版本失配被拒，后续旧 token 也能从缓存短路。
+        // 写失败只降级，不影响本次判定。
+        if (redis != null) {
+            redis.set(CacheKeys.tokenVersion(dbUser.getId()), Integer.toString(currentVersion),
+                    Duration.ofHours(Math.max(1L, cacheProperties.getAuthTtlHours())));
+        }
         // 令牌版本号失配 = 该 token 已被吊销：改密码、管理员重置密码、主动退出登录都会让版本号 +1，
         // 这是「JWT 无状态无法作废」的补位设计，见 sys_user.token_version（V7）
-        if (loginUser.tokenVersion() != dbUser.tokenVersionOrDefault()) {
+        if (loginUser.tokenVersion() != currentVersion) {
             writeError(response, HttpServletResponse.SC_UNAUTHORIZED, 4012, "登录状态已变更，请重新登录");
             return false;
         }
         // 以库里的最新角色为准，防止用户提权后旧 token 仍带旧角色
         LoginUser effective = new LoginUser(dbUser.getId(), dbUser.getUsername(),
-                dbUser.getNickname(), dbUser.getRole(), dbUser.tokenVersionOrDefault());
+                dbUser.getNickname(), dbUser.getRole(), currentVersion);
         UserContext.set(effective);
 
         // RBAC：普通用户不得触碰管理类接口；但文档原文预览 /api/documents/{id}/preview 例外——
@@ -201,6 +230,19 @@ public class AuthInterceptor implements HandlerInterceptor {
     private boolean isUserCarveOut(String path) {
         return (path.startsWith("/api/documents/") && path.endsWith("/preview"))
                 || ADMIN_PREFIX_USER_PATHS.contains(path);
+    }
+
+    /** 读缓存里的令牌版本号；未命中 / 非法数字都返回 null（回退查库），不抛异常 */
+    private Integer readCachedTokenVersion(RedisCacheService redis, Long userId) {
+        String raw = redis.get(CacheKeys.tokenVersion(userId));
+        if (StringUtils.isBlank(raw)) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(raw.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private void writeError(HttpServletResponse response, int httpStatus, int code, String message)

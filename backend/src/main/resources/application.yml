@@ -25,6 +25,23 @@ spring:
     multipart:
       max-file-size: 50MB
       max-request-size: 200MB
+  # Redis（第十阶段：Query 向量 L2 缓存 / 鉴权与空间集合缓存 / Agent 分布式锁）。
+  # 连接信息走环境变量；未部署 Redis 时把 kb.cache.enabled 置 false 即全量本地降级。
+  # 命令与连接超时都收短到 2s：Redis 挂掉时让降级尽快发生，而不是把请求挂在默认 60s 超时上。
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DB:0}
+      timeout: 2s
+      connect-timeout: 2s
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+          max-wait: 2s
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -50,14 +67,34 @@ rag:
   embedding-enabled: ${RAG_EMBEDDING_ENABLED:true}
   # 向量库持久化文件（InMemoryEmbeddingStore 序列化，重启自动加载，零外部依赖）
   embedding-store-path: ${RAG_EMBEDDING_STORE_PATH:./data/embeddings/store.json}
+  # 向量存储引擎类型（VectorStoreEngine 条件装配）：
+  # local = 内存索引 + 临时文件 ATOMIC_MOVE 原子落盘（默认，零外部依赖）；
+  # pgvector = 生产分布式演进预留骨架（尚未实现，误切会让核心操作明确报错而不是静默丢向量）
+  vector-store:
+    type: ${RAG_VECTOR_STORE_TYPE:local}
   # text-embedding-v3 批量上限较小，按此切批调用，避免服务端拒绝
   embedding-batch-size: ${RAG_EMBEDDING_BATCH_SIZE:10}
   # 问题向量化超时秒数：检索慢就是体验事故，超时应明显短于对话模型的 60 秒，让词法路及时顶上
   embedding-timeout-seconds: ${RAG_EMBEDDING_TIMEOUT_SECONDS:20}
-  # 问题向量缓存条数（同模型同问题的向量是确定性的，只受内存约束）；0 = 关闭缓存
-  embedding-query-cache-size: ${RAG_EMBEDDING_QUERY_CACHE_SIZE:512}
+  # 问题向量一级缓存（Caffeine L1）条数上限：同模型同问题的向量是确定性的，只受内存约束；0 = 关闭
+  embedding-query-cache-size: ${RAG_EMBEDDING_QUERY_CACHE_SIZE:1000}
+  # L1 写后过期分钟数：短时命中反复提问，过期回落 L2 / 远程
+  embedding-query-cache-expire-minutes: ${RAG_EMBEDDING_QUERY_CACHE_EXPIRE_MINUTES:5}
+  # 问题向量二级缓存（Redis L2）存活小时数，Key=rag:emb:{sha256}；kb.cache.enabled=false 时退回仅 L1
+  embedding-l2-ttl-hours: ${RAG_EMBEDDING_L2_TTL_HOURS:24}
   # RRF 倒数排名融合常数 k：得分 = Σ 1/(k + rank)，60 为通用默认
   rrf-k: ${RAG_RRF_K:60}
+  # Rerank 精排：双路召回 → RRF 粗排取 candidates 条 → gte-rerank-v2 Cross-Encoder 精排 → 保留 min(top-k, top-n) 条。
+  # 复用 rag.api-key；关闭 / 无密钥 / 超时 / 报错时自动降级为 RRF 粗排 Top-K，绝不阻断问答主链路。
+  # 注意 1：gte-rerank 系列走百炼原生端点（下方 endpoint），不是 base-url 的 OpenAI 兼容协议地址。
+  # 注意 2：默认用 v2——v1 的 gte-rerank 实测返回 403 AccessDenied（已不对该账号开放），v2 报文结构相同。
+  rerank:
+    enabled: ${RAG_RERANK_ENABLED:true}
+    model: ${RAG_RERANK_MODEL:gte-rerank-v2}
+    top-n: ${RAG_RERANK_TOP_N:5}
+    candidates: ${RAG_RERANK_CANDIDATES:20}
+    timeout-seconds: ${RAG_RERANK_TIMEOUT_SECONDS:3}
+    endpoint: ${RAG_RERANK_ENDPOINT:https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank}
   # 语义召回最低相似度阈值，0 = 只按排名截断不做绝对分数过滤（利于同义词命中）
   semantic-min-score: ${RAG_SEMANTIC_MIN_SCORE:0.0}
   # 词法召回实现：fulltext = 走 kb_chunk 的 FULLTEXT ngram 索引（默认）；like = 逐词 LIKE 全表扫描兜底
@@ -94,6 +131,19 @@ auth:
   expire-minutes: ${AUTH_EXPIRE_MINUTES:720}
   # 测试放行开关：仅测试环境置 true（缺 token 时注入管理员身份），生产必须 false
   test-bypass: ${AUTH_TEST_BYPASS:false}
+
+# 分布式缓存与锁（第十阶段），映射到 com.bishe.kb.config.KbCacheProperties。
+# enabled=false 时不装配 RedisCacheService：Query 向量退回 Caffeine L1、鉴权/空间集合每次查库、
+# Agent 单用户并发退回进程内闸门。测试 profile 固定关闭，生产默认打开。
+kb:
+  cache:
+    enabled: ${KB_CACHE_ENABLED:true}
+    # 鉴权缓存（auth:token_ver:{userId} / auth:spaces:{userId}）存活时间，默认 2 小时
+    auth-ttl-hours: ${KB_CACHE_AUTH_TTL_HOURS:2}
+    # Agent 单用户分布式锁过期秒数，与 rag.agent-timeout-millis 对齐；持有者崩溃时到点自动释放
+    agent-lock-ttl-seconds: ${KB_CACHE_AGENT_LOCK_TTL_SECONDS:90}
+    # 探测到 Redis 不可用后的降级背避窗口（毫秒），窗口内不再发起注定失败的连接
+    unavailable-backoff-millis: ${KB_CACHE_UNAVAILABLE_BACKOFF_MILLIS:10000}
 
 logging:
   level:

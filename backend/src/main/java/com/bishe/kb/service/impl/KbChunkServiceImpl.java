@@ -16,6 +16,7 @@ import com.bishe.kb.model.vo.ChunkCorpusStatsVO;
 import com.bishe.kb.model.vo.ChunkVO;
 import com.bishe.kb.model.vo.CorpusChunkVO;
 import com.bishe.kb.service.KbChunkService;
+import com.bishe.kb.service.VectorStoreEngine;
 import com.bishe.kb.util.AfterCommitRunner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -41,7 +42,7 @@ import java.util.stream.Collectors;
  *   <li>启用分段 —— 重新写入向量库，语义路恢复召回。</li>
  *   <li>编辑正文 —— 先移除旧向量，若处于启用态再按新正文重新嵌入，避免旧语义残留。</li>
  * </ul>
- * 所有向量操作都由 {@link VectorIndexService} 内部降级保护，未开启向量或接口异常都不会阻断本次数据库改动。
+ * 所有向量操作都由 {@link VectorStoreEngine} 内部降级保护，未开启向量或接口异常都不会阻断本次数据库改动。
  *
  * <p>写路径都带事务，向量同步一律排在 {@code afterCommit}（见
  * {@link com.bishe.kb.util.AfterCommitRunner}）。理由是这三处都是「数据库改完再改向量库」，
@@ -57,7 +58,7 @@ public class KbChunkServiceImpl extends ServiceImpl<KbChunkMapper, KbChunk> impl
     /** 单次批量启停允许的最大条数：再大就该按文档整篇重跑，而不是逐条点 */
     private static final int BATCH_STATUS_LIMIT = 500;
 
-    private final VectorIndexService vectorIndexService;
+    private final VectorStoreEngine vectorStoreEngine;
     private final KbDocumentMapper documentMapper;
     private final KbSpaceMapper spaceMapper;
 
@@ -95,9 +96,9 @@ public class KbChunkServiceImpl extends ServiceImpl<KbChunkMapper, KbChunk> impl
         boolean enabled = isEnabled(chunk);
         chunk.setSpaceId(spaceIdOf(chunk.getDocumentId()));
         AfterCommitRunner.run(() -> {
-            vectorIndexService.removeChunk(id);
+            vectorStoreEngine.removeChunk(id);
             if (enabled) {
-                vectorIndexService.indexChunks(List.of(chunk));
+                vectorStoreEngine.indexChunks(List.of(chunk));
             }
         });
         log.info("人工编辑分段完成 id={} 新字符数={} enabled={}", id, content.length(), chunk.getEnabled());
@@ -121,10 +122,10 @@ public class KbChunkServiceImpl extends ServiceImpl<KbChunkMapper, KbChunk> impl
         AfterCommitRunner.run(() -> {
             if (next == 1) {
                 // 重新启用：把分段写回向量库，语义召回恢复
-                vectorIndexService.indexChunks(List.of(chunk));
+                vectorStoreEngine.indexChunks(List.of(chunk));
             } else {
                 // 禁用：从向量库移除，语义召回不再命中
-                vectorIndexService.removeChunk(id);
+                vectorStoreEngine.removeChunk(id);
             }
         });
         log.info("切换分段状态 id={} enabled={}", id, next);
@@ -243,9 +244,9 @@ public class KbChunkServiceImpl extends ServiceImpl<KbChunkMapper, KbChunk> impl
         // 排在提交后还有个附带好处：最长的那段公网 embedding 调用不再占着数据库连接。
         AfterCommitRunner.run(() -> {
             if (enabled == 1) {
-                vectorIndexService.indexChunks(toSync);
+                vectorStoreEngine.indexChunks(toSync);
             } else {
-                vectorIndexService.removeChunks(idsToUnindex);
+                vectorStoreEngine.removeChunks(idsToUnindex);
             }
         });
         log.info("批量切换切片状态完成 目标enabled={} 请求={} 实际变更={}", enabled, distinctIds.size(), changed.size());

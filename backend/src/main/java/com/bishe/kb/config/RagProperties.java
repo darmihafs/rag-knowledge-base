@@ -107,17 +107,33 @@ public class RagProperties {
     private int embeddingTimeoutSeconds = 20;
 
     /**
-     * 问题向量缓存的条数上限。同一个模型对同一句问题的向量是确定性的，
-     * 所以这里没有新鲜度问题，只有内存问题：1536 维一条约 6KB，512 条约 3MB。
-     * 设 0 即关闭缓存。
+     * 问题向量一级缓存（Caffeine L1）的条数上限。同一个模型对同一句问题的向量是确定性的，
+     * 所以这里没有新鲜度问题，只有内存问题：1536 维一条约 6KB，1000 条约 6MB。
+     * 设 0 即关闭缓存。二级缓存（Redis L2）见 {@link #embeddingL2TtlHours}。
      */
-    private int embeddingQueryCacheSize = 512;
+    private int embeddingQueryCacheSize = 1000;
+
+    /**
+     * 问题向量一级缓存（Caffeine L1）的写后过期分钟数，默认 5 分钟。
+     * L1 只追求「同一批问题反复问」的短时命中，过期后回落 L2 / 远程，避免长期占用堆内存。
+     */
+    private long embeddingQueryCacheExpireMinutes = 5;
+
+    /**
+     * 问题向量二级缓存（Redis L2）的存活小时数，默认 24 小时，Key 形如 {@code rag:emb:{sha256}}。
+     * L2 跨实例共享：一个实例算过的问题向量，其他实例直接复用，省去公网往返。
+     * {@code kb.cache.enabled=false} 或 Redis 不可达时自动退回仅 L1。
+     */
+    private long embeddingL2TtlHours = 24;
 
     /**
      * RRF（倒数排名融合）常数 k，得分 = Σ 1/(k + rank)。k 越大越平滑两路排名的差异，
      * 60 是学界与工程界的通用默认值。
      */
     private int rrfK = 60;
+
+    /** Rerank 精排（RRF 粗排之后的 Cross-Encoder 二次排序），详见 {@link Rerank} */
+    private Rerank rerank = new Rerank();
 
     /**
      * 语义召回的最低相似度阈值。设 0 表示只按排名截断、不做绝对分数过滤，
@@ -152,4 +168,41 @@ public class RagProperties {
      * 管理员可以在「引擎参数配置」页运行时修改，不需要重启。
      */
     private String systemPrompt = "";
+
+    /**
+     * DashScope gte-rerank 精排参数。
+     *
+     * <p>流水线位置：双路召回 → RRF 粗排（取 {@link #candidates} 条候选）→ Cross-Encoder 精排
+     * → 保留前 {@link #topN} 条。精排是「加分项」而不是「必选项」：开关关闭、未配 API Key、
+     * 超时或接口报错时，检索链路自动回退为 RRF 粗排 Top-K，绝不阻断问答主链路。
+     *
+     * <p>注意 gte-rerank 走百炼<b>原生</b> text-rerank 端点，不是 {@code rag.base-url}
+     * 指向的 OpenAI 兼容协议地址，两者不能混用。
+     */
+    @Data
+    public static class Rerank {
+
+        /** 总开关。关闭时精排装饰器直接透传，等价于旧的「双路 + RRF」链路 */
+        private boolean enabled = true;
+
+        /**
+         * 精排模型名，默认 gte-rerank-v2。
+         *
+         * <p>不用 v1 的 {@code gte-rerank}：实测该账号调用 v1 返回 403 AccessDenied
+         * （百炼已把文本排序主力切到 v2），v2 报文结构与 v1 完全一致。
+         */
+        private String model = "gte-rerank-v2";
+
+        /** 精排后最多保留条数；实际返回 min(topK, topN)，不会超过调用方要的 topK */
+        private int topN = 5;
+
+        /** 送入精排的 RRF 粗排候选条数。太少体现不出精排收益，太多徒增时延与 token 成本 */
+        private int candidates = 20;
+
+        /** 精排 HTTP 调用超时秒数（连接与读取各自计时）。超时立刻降级为 RRF 粗排结果 */
+        private int timeoutSeconds = 3;
+
+        /** 百炼文本排序原生端点 */
+        private String endpoint = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank";
+    }
 }

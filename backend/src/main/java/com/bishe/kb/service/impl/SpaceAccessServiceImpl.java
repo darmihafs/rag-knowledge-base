@@ -1,7 +1,10 @@
 package com.bishe.kb.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.bishe.kb.cache.CacheKeys;
+import com.bishe.kb.cache.RedisCacheService;
 import com.bishe.kb.common.BizException;
+import com.bishe.kb.config.KbCacheProperties;
 import com.bishe.kb.mapper.KbSpaceMapper;
 import com.bishe.kb.mapper.KbSpaceMemberMapper;
 import com.bishe.kb.mapper.SysUserMapper;
@@ -17,10 +20,13 @@ import com.bishe.kb.service.RetrievalScope;
 import com.bishe.kb.service.SpaceAccessService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -34,8 +40,11 @@ import java.util.stream.Collectors;
  * 未授权空间的切片根本不进候选池。若在内存里过滤，topK 会被越权切片占满，
  * 「隔离」就变成了「偶尔生效」。
  *
- * <p>每次请求查一次成员表（走 {@code idx_member_user} 索引）。没有加缓存是刻意的：
- * 授权关系必须立刻生效，撤销权限后还能检索到旧内容，比多一次主键索引查询严重得多。
+ * <p>可见集合默认查一次成员表（走 {@code idx_member_user} 索引）；开启 Redis 后读路径命中
+ * {@code auth:spaces:{userId}} 缓存（TTL 2 小时），省去重复查表。授权关系必须立刻生效，
+ * 因此 grant / revoke / joinDefaultSpace / deleteSpace 都在<b>事务提交后</b>主动淘汰对应用户的缓存
+ * （无事务时立即淘汰），下一次请求必然回源读到最新成员关系——撤销权限后不会检索到旧内容。
+ * Redis 不可用时读写自动降级为每次查库，与升级前行为一致。
  */
 @Slf4j
 @Service
@@ -45,6 +54,9 @@ public class SpaceAccessServiceImpl implements SpaceAccessService {
     private final KbSpaceMemberMapper memberMapper;
     private final KbSpaceMapper spaceMapper;
     private final SysUserMapper userMapper;
+    /** Redis 缓存可选注入：关闭时拿到 null，可见集合每次查库（与升级前一致） */
+    private final ObjectProvider<RedisCacheService> redisCacheProvider;
+    private final KbCacheProperties cacheProperties;
 
     @Override
     public List<Long> currentVisibleSpaceIds() {
@@ -53,10 +65,22 @@ public class SpaceAccessServiceImpl implements SpaceAccessService {
         if (current == null || current.isAdmin()) {
             return null;
         }
-        return memberMapper.selectList(new LambdaQueryWrapper<KbSpaceMember>()
+        Long userId = current.id();
+        RedisCacheService redis = redisCacheProvider.getIfAvailable();
+        if (redis != null) {
+            List<Long> cached = readCachedSpaces(redis, userId);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        List<Long> ids = memberMapper.selectList(new LambdaQueryWrapper<KbSpaceMember>()
                         .select(KbSpaceMember::getSpaceId)
-                        .eq(KbSpaceMember::getUserId, current.id()))
+                        .eq(KbSpaceMember::getUserId, userId))
                 .stream().map(KbSpaceMember::getSpaceId).filter(Objects::nonNull).distinct().toList();
+        if (redis != null) {
+            writeCachedSpaces(redis, userId, ids);
+        }
+        return ids;
     }
 
     @Override
@@ -159,6 +183,8 @@ public class SpaceAccessServiceImpl implements SpaceAccessService {
                 log.debug("空间授权重复提交已被唯一键挡下 spaceId={} userId={}", spaceId, userId);
             }
         }
+        // 事务提交后淘汰受影响用户的可见集合缓存，下一次请求回源读到新授权（无事务时立即淘汰）
+        distinct.forEach(this::evictSpacesCache);
         log.info("空间授权完成 spaceId={} name={} 请求={} 新增={}", spaceId, space.getName(), distinct.size(), added);
         return added;
     }
@@ -174,6 +200,8 @@ public class SpaceAccessServiceImpl implements SpaceAccessService {
         int removed = memberMapper.delete(new LambdaQueryWrapper<KbSpaceMember>()
                 .eq(KbSpaceMember::getSpaceId, spaceId)
                 .in(KbSpaceMember::getUserId, distinct));
+        // 撤销后立即淘汰缓存：被移出的人下一次请求回源即失去该空间，越权短路即时生效
+        distinct.forEach(this::evictSpacesCache);
         log.info("撤销空间授权 spaceId={} 请求={} 实际移除={}", spaceId, distinct.size(), removed);
         return removed;
     }
@@ -198,9 +226,57 @@ public class SpaceAccessServiceImpl implements SpaceAccessService {
         } catch (DuplicateKeyException e) {
             log.debug("默认空间授权重复提交已被唯一键挡下 userId={}", user.getId());
         }
+        // 新授权（或降级补授权）后淘汰缓存，保证「注册即可问答」立刻成立
+        evictSpacesCache(user.getId());
     }
 
     // ------------------------------------------------------------------ 内部方法
+
+    /**
+     * 读可见集合缓存。返回 null 表示未命中或 Redis 降级（调用方回源查库）；
+     * 返回空列表表示「缓存命中且该用户没有任何授权」——空集合也要缓存，
+     * 否则未授权用户每次请求都查库，且 {@code in(空集合)} 的越权风险由调用方按空列表收口。
+     */
+    private List<Long> readCachedSpaces(RedisCacheService redis, Long userId) {
+        String raw = redis.get(CacheKeys.spaces(userId));
+        if (raw == null) {
+            return null;
+        }
+        if (raw.isEmpty()) {
+            return List.of();
+        }
+        try {
+            return Arrays.stream(raw.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .map(Long::valueOf)
+                    .distinct()
+                    .toList();
+        } catch (NumberFormatException e) {
+            // 缓存值被写坏时当作未命中，回源查库重建，绝不因缓存格式问题放行或拒绝
+            return null;
+        }
+    }
+
+    /** 写可见集合缓存：逗号分隔的 ID 串，空集合存空串（与「未命中 null」区分） */
+    private void writeCachedSpaces(RedisCacheService redis, Long userId, List<Long> ids) {
+        String raw = ids.stream().map(String::valueOf).collect(Collectors.joining(","));
+        redis.set(CacheKeys.spaces(userId), raw, Duration.ofHours(Math.max(1L, cacheProperties.getAuthTtlHours())));
+    }
+
+    /**
+     * 淘汰某用户的可见集合缓存：事务提交后再删（无事务时立即删），避免把未提交的旧成员关系
+     * 回源写回缓存。Redis 不可用（Bean 缺失或 delete 内部降级）时静默跳过，读路径会回源查库。
+     */
+    private void evictSpacesCache(Long userId) {
+        if (userId == null) {
+            return;
+        }
+        RedisCacheService redis = redisCacheProvider.getIfAvailable();
+        if (redis != null) {
+            redis.deleteAfterCommit(CacheKeys.spaces(userId));
+        }
+    }
 
     private SpaceVO toVo(KbSpace space) {
         return new SpaceVO(space.getId(), space.getName(), space.getDescription(),

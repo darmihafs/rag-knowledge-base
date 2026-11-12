@@ -3,6 +3,8 @@ package com.bishe.kb.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
+import com.bishe.kb.cache.CacheKeys;
+import com.bishe.kb.cache.RedisCacheService;
 import com.bishe.kb.common.BizException;
 import com.bishe.kb.mapper.SysUserMapper;
 import com.bishe.kb.model.dto.RegisterRequest;
@@ -12,6 +14,7 @@ import com.bishe.kb.service.SysUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -32,6 +35,8 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
 
     private final PasswordEncoder passwordEncoder;
     private final SpaceAccessService spaceAccessService;
+    /** Redis 缓存可选注入：关闭时拿到 null，吊销只走数据库版本号自增（与升级前一致） */
+    private final ObjectProvider<RedisCacheService> redisCacheProvider;
 
     @Override
     public SysUser findByUsername(String username) {
@@ -93,6 +98,13 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
         boolean applied = update(new LambdaUpdateWrapper<SysUser>()
                 .eq(SysUser::getId, userId)
                 .setSql("token_version = token_version + 1"));
+        // 主动淘汰令牌版本号缓存：下一次请求必然回源读到新版本号，旧 token 立即被拦截器短路拒绝。
+        // 放在数据库自增之后，保证回源拿到的是递增后的值；Redis 不可用时 delete 内部静默降级，
+        // 拦截器接受路径仍以数据库为准，不会因此放过已吊销的 token。
+        RedisCacheService redis = redisCacheProvider.getIfAvailable();
+        if (redis != null) {
+            redis.delete(CacheKeys.tokenVersion(userId));
+        }
         log.info("吊销既有登录令牌 userId={} 生效={}", userId, applied);
     }
 }

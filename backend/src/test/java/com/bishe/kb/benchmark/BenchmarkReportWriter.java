@@ -201,6 +201,7 @@ public final class BenchmarkReportWriter {
         StringBuilder md = new StringBuilder();
         int sections = intOf(dataset, "知识切片数", 0);
         int evalWindow = intOf(environment, "评测窗口 K", 10);
+        int degraded = intOf(environment, "精排臂降级题数", 0);
         int totalQueries = ablation.stream()
                 .filter(r -> "ALL".equals(r.category()) && "HYBRID".equals(r.strategy()))
                 .mapToInt(MetricRow::queries).findFirst().orElse(0);
@@ -226,13 +227,16 @@ public final class BenchmarkReportWriter {
         md.append("## 3 实验一：检索策略消融实验\n\n");
         md.append("统一取 Top-" + evalWindow + " 候选，Hit@K 按前 1/3/5 名截断，MRR 在 Top-" + evalWindow
                 + " 窗口内取首个命中名次的倒数"
-                + "（窗口内未命中记 0）。耗时为单次召回端到端时间，语义路与混合路包含一次问题向量化网络请求。\n\n");
+                + "（窗口内未命中记 0）。耗时为单次召回端到端时间，语义路与混合路包含一次问题向量化网络请求。"
+                + "基线三策略均在关闭 Rerank 精排下运行；另设「RRF 粗排 + 精排」生产流水线附加臂，"
+                + "top-n 设为评测窗口保证同窗口可比（见 3.4）。\n\n");
         md.append("### 3.1 总体指标\n\n");
-        md.append("**表 1 三种检索策略的总体召回性能（评测窗口 Top-" + evalWindow + "，n=" + totalQueries + "）**\n\n");
+        md.append("**表 1 各检索策略的总体召回性能（评测窗口 Top-" + evalWindow + "，n=" + totalQueries
+                + "，含 Rerank 精排臂）**\n\n");
         md.append(tableOf(filter(ablation, "ALL")));
         md.append('\n');
         md.append("### 3.2 分问题类别指标\n\n");
-        md.append("**表 2 三种检索策略在 A/B/C 三类问题上的召回性能（" + categorySampleSizes(ablation) + "）**\n\n");
+        md.append("**表 2 各检索策略在 A/B/C 三类问题上的召回性能（" + categorySampleSizes(ablation) + "）**\n\n");
         for (String category : List.of("A", "B", "C")) {
             md.append("**").append(category).append(" 类问题**\n\n");
             md.append(tableOf(filterCategory(ablation, category)));
@@ -241,12 +245,14 @@ public final class BenchmarkReportWriter {
         md.append(ablationAnalysis(ablation, queryRows, sections, evalWindow));
         md.append("### 3.3 两路互补性的逐题证据\n\n");
         md.append(complementarity(queryRows));
+        md.append(rerankAnalysis(ablation, queryRows, evalWindow, degraded));
 
         md.append("## 4 实验二：切片窗口大小敏感度实验\n\n");
         md.append("四档配置保持重叠比例为单块上限的 15%（"
                 + String.join("/", configs.stream().map(c -> String.valueOf(c.chunkOverlapChars())).toList())
                 + " 字），语料与问题集不变，"
-                + "仅改变 `TextChunker` 的切分粒度后重新向量化入库。\n\n");
+                + "仅改变 `TextChunker` 的切分粒度后重新向量化入库。"
+                + "本实验统一关闭 Rerank 精排，隔离「切分粒度」这一个变量。\n\n");
         md.append("### 4.1 切分结果概览\n\n");
         md.append("**表 3 四档切分粒度在库内产生的切片统计**\n\n");
         md.append(chunkConfigTable(configs, ablation.isEmpty() ? 0 : ablation.get(0).queries()));
@@ -258,7 +264,7 @@ public final class BenchmarkReportWriter {
         md.append(sensitivityAnalysis(sensitivity, configs, evalWindow));
 
         md.append("## 5 结论\n\n")
-                .append(conclusions(ablation, sensitivity, configs, intOf(environment, "RRF 常数 k", 60)))
+                .append(conclusions(ablation, sensitivity, configs, intOf(environment, "RRF 常数 k", 60), degraded))
                 .append('\n');
 
         md.append("## 6 局限与注意事项\n\n");
@@ -267,10 +273,13 @@ public final class BenchmarkReportWriter {
                 + "`evidence_in_corpus` 列记录了每题证据在该粒度下是否仍可整段命中，"
                 + "`answerable_queries` 列已把不可判定的样本从分母中剔除。\n");
         md.append(ceilingNote(sections, evalWindow));
-        md.append("- 跑批本身不含随机项：词法打分、余弦相似度与 RRF 排序都是确定性的，同一份语料与问题集重跑，"
-                + "Hit@K 与 MRR 不会变化，只有耗时字段抖动；若论文需要置信区间，可多次执行跑批后按 "
+        md.append("- 基线臂跑批不含随机项：词法打分、余弦相似度与 RRF 排序都是确定性的，同一份语料与问题集重跑，"
+                + "基线臂的 Hit@K 与 MRR 不会变化，只有耗时字段抖动；若论文需要置信区间，可多次执行跑批后按 "
                 + "`config + strategy` 合并 CSV 再统计。语义路耗时受公网调用延迟影响明显，与本地词法路的耗时"
                 + "不可直接等价比较，因此本实验以召回质量为主要论证对象。\n");
+        md.append("- Rerank 精排臂依赖百炼在线模型：模型版本静默升级可能引起打分漂移，跨批次对比应记录模型名与跑批时间；"
+                + "精排超时/报错会按题降级为粗排结果（口径见 3.4），该臂耗时字段包含公网抖动，"
+                + "同样不可与本地词法路直接等价比较。\n");
         md.append("- 向量库为一期内存实现（序列化到本地 JSON），十万级语料下的性能与召回表现需另行验证。\n");
         md.append("- 词法路耗时是「H2 内存库 + " + sections
                 + " 段候选 + 逐词 LIKE 扫描」口径下的数字，与生产 MySQL 十万级语料不可直接比较；"
@@ -280,8 +289,8 @@ public final class BenchmarkReportWriter {
                 + " 题，属于教学级评测集，"
                 + "不代表公开基准（如 DuReader、MS MARCO）上的可比结果。\n\n");
 
-        md.append("## 7 附录：逐题明细（混合检索在实验一中的全部结果）\n\n");
-        md.append("**表 5 逐题检索明细（混合检索，实验一）**\n\n");
+        md.append("## 7 附录：逐题明细（混合检索基线与精排臂在实验一中的全部结果）\n\n");
+        md.append("**表 5 逐题检索明细（混合检索基线 vs Rerank 精排，实验一）**\n\n");
         md.append(querySampleTable(queryRows, evalWindow));
         md.append('\n');
         md.append("## 8 复现方式\n\n");
@@ -346,15 +355,24 @@ public final class BenchmarkReportWriter {
         List<QueryRow> ablationHybrid = rows.stream()
                 .filter(r -> "experiment1_ablation".equals(r.experiment()) && "HYBRID".equals(r.strategy()))
                 .toList();
+        Map<String, Integer> rerankRanks = new java.util.LinkedHashMap<>();
+        for (QueryRow r : rows) {
+            if ("experiment1_ablation".equals(r.experiment()) && "HYBRID_RERANK".equals(r.strategy())) {
+                rerankRanks.put(r.queryId(), r.evidenceRank());
+            }
+        }
         StringBuilder sb = new StringBuilder();
-        sb.append("| 题号 | 类别 | 问题 | 目标切片 | 证据 | 混合检索命中名次 | 字面重合度 |\n");
-        sb.append("| --- | --- | --- | --- | --- | --- | --- |\n");
+        sb.append("| 题号 | 类别 | 问题 | 目标切片 | 证据 | 混合检索命中名次 | 精排后命中名次 | 字面重合度 |\n");
+        sb.append("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for (QueryRow r : ablationHybrid) {
+            Integer fineRank = rerankRanks.get(r.queryId());
             sb.append("| ").append(r.queryId()).append(" | ").append(r.category())
                     .append(" | ").append(escapeCell(r.question())).append(" | ")
                     .append(r.targetSection()).append(" | ").append(escapeCell(r.evidence()))
                     .append(" | ").append(r.evidenceRank() == null
                             ? "未命中(Top-" + evalWindow + ")" : "第 " + r.evidenceRank() + " 名")
+                    .append(" | ").append(!rerankRanks.containsKey(r.queryId()) ? "—"
+                            : fineRank == null ? "未命中(Top-" + evalWindow + ")" : "第 " + fineRank + " 名")
                     .append(" | ").append(pct(r.overlap())).append(" |\n");
         }
         return sb.toString();
@@ -612,6 +630,207 @@ public final class BenchmarkReportWriter {
         return ids.isEmpty() ? "（无）" : "：" + String.join("、", ids);
     }
 
+    // ------------------------------------------------------------------ 3.4 Rerank 精排消融
+
+    /**
+     * 3.4 Rerank 精排消融：结论全部由基线臂与精排臂的实测差值推导，重跑换数据后自动改口。
+     *
+     * <p>没有精排臂数据时返回空串（兼容旧跑批），其余章节不受影响——
+     * 全文所有既有分析都按显式策略名 LEXICAL / SEMANTIC / HYBRID 过滤，HYBRID_RERANK 不会混进去。
+     */
+    private String rerankAnalysis(List<MetricRow> rows, List<QueryRow> queryRows, int evalWindow, int degraded) {
+        MetricRow base = find(rows, "HYBRID", "ALL");
+        MetricRow fine = find(rows, "HYBRID_RERANK", "ALL");
+        if (base == null || fine == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("### 3.4 Rerank 精排消融（RRF 粗排 vs RRF + Cross-Encoder 精排）\n\n");
+        sb.append("精排臂走生产 `RerankRetrievalService` 装饰器：RRF 粗排先放大候选池"
+                + "（`rag.rerank.candidates`，见实验环境表「Rerank 精排」行），"
+                + "精排模型对 query × 候选正文逐对打分重排，保留前 min(topK, top-n) 条；"
+                + "评测时 top-n 设为 Top-").append(evalWindow)
+                .append("，与基线臂同窗口，Hit@K 与 MRR 直接可比。"
+                        + "基线臂在 `rag.rerank.enabled=false` 下运行，即原「双路 + RRF」流水线。\n\n");
+        sb.append("**表 6 精排前后召回性能对比（评测窗口 Top-").append(evalWindow).append("）**\n\n");
+        sb.append(rerankTable(rows));
+        sb.append('\n');
+        sb.append(rerankReading(base, fine, rows, queryRows, evalWindow, degraded));
+        return sb.toString();
+    }
+
+    /** 表 6：每个类别一行，粗排 → 精排成对展示，论文里可直接当三线表用 */
+    private String rerankTable(List<MetricRow> rows) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("| 问题类别 | Hit@1（粗排→精排） | Hit@3（粗排→精排） | Hit@5（粗排→精排） "
+                + "| MRR（粗排→精排） | 平均耗时ms（粗排→精排） |\n");
+        sb.append("| --- | --- | --- | --- | --- | --- |\n");
+        for (String category : List.of("ALL", "A", "B", "C")) {
+            MetricRow base = find(rows, "HYBRID", category);
+            MetricRow fine = find(rows, "HYBRID_RERANK", category);
+            if (base == null || fine == null) {
+                continue;
+            }
+            sb.append("| ").append(cnCategory(category))
+                    .append(" | ").append(pct(base.hitAt1())).append(" → ").append(pct(fine.hitAt1()))
+                    .append(" | ").append(pct(base.hitAt3())).append(" → ").append(pct(fine.hitAt3()))
+                    .append(" | ").append(pct(base.hitAt5())).append(" → ").append(pct(fine.hitAt5()))
+                    .append(" | ").append(num(base.mrr())).append(" → ").append(num(fine.mrr()))
+                    .append(" | ").append(num(base.avgLatencyMillis())).append(" → ")
+                    .append(num(fine.avgLatencyMillis())).append(" |\n");
+        }
+        return sb.toString();
+    }
+
+    private String rerankReading(MetricRow base, MetricRow fine, List<MetricRow> rows,
+                                 List<QueryRow> queryRows, int evalWindow, int degraded) {
+        StringBuilder sb = new StringBuilder();
+        boolean allDegraded = degraded > 0 && degraded >= fine.queries();
+        sb.append("**现象与分析**\n\n");
+        if (allDegraded) {
+            // 全降级时精排臂指标 ≈ 粗排 + 失败调用耗时，任何「精排收益」措辞都会误导读者
+            sb.append("> **警告：本批 ").append(degraded).append(" / ").append(fine.queries())
+                    .append(" 题的精排调用全部失败并降级为 RRF 粗排结果**（原因见后端 WARN 日志，"
+                            + "常见为模型未开通 403 / 限流 429 / 超时）。下表的「精排」列实际是粗排数据"
+                            + "叠加失败调用的耗时，**不能据此论证精排收益**；"
+                            + "请先修复精排调用（核对 `rag.rerank.model` 与账号权限）再重跑本实验。\n\n");
+        }
+        sb.append("- 总体（n=").append(fine.queries()).append("）：Hit@1 ").append(pct(base.hitAt1()))
+                .append(" → ").append(pct(fine.hitAt1())).append("（").append(versus(fine.hitAt1(), base.hitAt1()))
+                .append("），MRR ").append(num(base.mrr())).append(" → ").append(num(fine.mrr()))
+                .append("，Hit@5 ").append(pct(base.hitAt5())).append(" → ").append(pct(fine.hitAt5()))
+                .append("。").append(allDegraded
+                        ? "该差异仅反映粗排候选池放大（candidates > topK）与随机抖动，与精排模型无关。\n"
+                        : rerankDirection(base, fine));
+        if (!allDegraded) {
+            sb.append("- 分类别看，MRR 增量最大的是 ").append(bestRerankCategory(rows)).append("。\n");
+        }
+        sb.append(rerankMovement(queryRows));
+        sb.append("- 时延代价：平均 ").append(num(base.avgLatencyMillis())).append(" ms → ")
+                .append(num(fine.avgLatencyMillis())).append(" ms（增量 ")
+                .append(num(fine.avgLatencyMillis() - base.avgLatencyMillis())).append(" ms），P95 ")
+                .append(num(base.p95LatencyMillis())).append(" → ").append(num(fine.p95LatencyMillis()))
+                .append(" ms。增量来自一次公网精排调用，与语义路的向量化请求同性质；"
+                        + "是否值得，要用上面实测的名次收益对照进入 Prompt 的 Top-")
+                .append(settings.productionTopK()).append(" 名额质量来判断，而不是只看耗时。\n");
+        sb.append("- 降级口径：某题精排超时（`rag.rerank.timeout-seconds`）或报错时，"
+                + "装饰器自动回退该题为 RRF 粗排结果（后端 WARN 日志），"
+                + "因此精排臂指标是「带降级保护的生产流水线」的下界，而不是「精排必然成功」的理想口径。"
+                + "本批实测降级 **").append(degraded).append(" / ").append(fine.queries()).append(" 题**"
+                + "（装饰器降级计数器差值，见实验环境表「精排臂降级题数」行）")
+                .append(degraded == 0 ? "，全部题目均拿到真实精排打分。\n\n"
+                        : "，降级题的名次与基线臂一致，可在 `query_level_results.csv` 里逐题核对。\n\n");
+        return sb.toString();
+    }
+
+    /** 精排收益的方向句：涨、部分涨、持平、跌四种情况都按实测数值如实措辞 */
+    private String rerankDirection(MetricRow base, MetricRow fine) {
+        boolean mrrUp = fine.mrr() > base.mrr();
+        boolean hit1Up = fine.hitAt1() > base.hitAt1();
+        if (mrrUp && hit1Up) {
+            return "精排同时抬高了 Hit@1 与 MRR：Cross-Encoder 对 query × 候选正文做深度语义匹配，"
+                    + "把正确切片顶到更靠前名次，正好补上 RRF「只看名次不看内容」的短板。\n";
+        }
+        if (mrrUp || hit1Up) {
+            return "精排抬高了 " + (mrrUp ? "MRR" : "Hit@1") + "，但 " + (mrrUp ? "Hit@1" : "MRR")
+                    + " 没有同步上升，说明收益集中在部分名次或部分题目上，逐题移动统计见下。\n";
+        }
+        if (fine.mrr() == base.mrr() && fine.hitAt1() == base.hitAt1()) {
+            return "本批精排与粗排持平：教学级语料的候选池小，RRF 已把正确切片顶到前列，"
+                    + "精排可提升的空间有限；该结论受尺度局限，不能外推到十万级语料。\n";
+        }
+        return "本批精排没有超过粗排：精排只能在粗排候选池内重排，正确切片若没被粗排召回、"
+                + "或模型对其打分偏低，精排无法救回；论文应如实报告这一负结果，"
+                + "并结合语料规模与模型版本分析原因。\n";
+    }
+
+    /** 分类别 MRR 增量之最：没有正收益时也如实说明 */
+    private String bestRerankCategory(List<MetricRow> rows) {
+        String best = null;
+        double bestDelta = Double.NEGATIVE_INFINITY;
+        for (String category : List.of("A", "B", "C")) {
+            MetricRow base = find(rows, "HYBRID", category);
+            MetricRow fine = find(rows, "HYBRID_RERANK", category);
+            if (base == null || fine == null) {
+                continue;
+            }
+            double delta = fine.mrr() - base.mrr();
+            if (delta > bestDelta) {
+                bestDelta = delta;
+                best = category;
+            }
+        }
+        if (best == null) {
+            return "（无分类别数据）";
+        }
+        MetricRow base = find(rows, "HYBRID", best);
+        MetricRow fine = find(rows, "HYBRID_RERANK", best);
+        return cnCategory(best) + "（MRR " + num(base.mrr()) + " → " + num(fine.mrr())
+                + "，增量 " + num(fine.mrr() - base.mrr()) + "）"
+                + (bestDelta <= 0 ? "，本批没有任何类别取得正的 MRR 增量" : "");
+    }
+
+    /**
+     * 精排前后的逐题名次移动：与 3.3 同一套 Top-K 口径。
+     *
+     * <p>「提前/退后」按窗口内名次比较（含 未命中→命中 与 命中→未命中），
+     * 「新进/挤出」按生产 Prompt 名额 Top-K 比较——两组口径回答的是不同问题：
+     * 前者说明精排的重排力度，后者说明进入 Prompt 的片段集合变化。
+     */
+    private String rerankMovement(List<QueryRow> queryRows) {
+        int topK = settings.productionTopK();
+        Map<String, Integer> base = new java.util.LinkedHashMap<>();
+        Map<String, Integer> fine = new java.util.LinkedHashMap<>();
+        for (QueryRow r : queryRows) {
+            if (!EXPERIMENT_1.equals(r.experiment())) {
+                continue;
+            }
+            if ("HYBRID".equals(r.strategy())) {
+                base.put(r.queryId(), r.evidenceRank());
+            } else if ("HYBRID_RERANK".equals(r.strategy())) {
+                fine.put(r.queryId(), r.evidenceRank());
+            }
+        }
+        List<String> promoted = new ArrayList<>();
+        List<String> demoted = new ArrayList<>();
+        List<String> rescued = new ArrayList<>();
+        List<String> lost = new ArrayList<>();
+        for (String id : base.keySet()) {
+            Integer b = base.get(id);
+            Integer f = fine.get(id);
+            if (!within(b, topK) && within(f, topK)) {
+                rescued.add(id);
+            }
+            if (within(b, topK) && !within(f, topK)) {
+                lost.add(id);
+            }
+            if (b != null && f != null) {
+                if (f < b) {
+                    promoted.add(id);
+                } else if (f > b) {
+                    demoted.add(id);
+                }
+            } else if (b == null && f != null) {
+                promoted.add(id);
+            } else if (b != null) {
+                demoted.add(id);
+            }
+        }
+        return "- 逐题移动（n=" + base.size() + "）：窗口内名次**提前** " + promoted.size() + " 题"
+                + listOf(promoted) + "，**退后** " + demoted.size() + " 题" + listOf(demoted)
+                + "；按生产 Prompt 名额 Top-" + topK + " 口径，**新进** " + rescued.size() + " 题"
+                + listOf(rescued) + "，**挤出** " + lost.size() + " 题" + listOf(lost)
+                + "。精排同样不是无损的：Cross-Encoder 的打分口径与 RRF 的名次融合不同，"
+                + "个别题目名次会回退，论文里应把提前与退后的样本并列呈现。\n";
+    }
+
+    /** 按策略 + 类别取行，取不到返回 null（精排臂可能缺席，调用方自行跳过） */
+    private MetricRow find(List<MetricRow> rows, String strategy, String category) {
+        return rows.stream()
+                .filter(r -> r.strategy().equals(strategy) && r.category().equals(category))
+                .findFirst().orElse(null);
+    }
+
     /** 比较短语由差值符号决定，保证正文断言与表格永远一致 */
     private static String versus(double main, double ref) {
         double diff = (main - ref) * 100;
@@ -700,7 +919,7 @@ public final class BenchmarkReportWriter {
     }
 
     private String conclusions(List<MetricRow> ablation, List<MetricRow> sensitivity,
-                               List<ChunkConfigRow> configs, int rrfK) {
+                               List<ChunkConfigRow> configs, int rrfK, int degraded) {
         MetricRow hybAll = pick(ablation, "HYBRID", "ALL");
         MetricRow lexAll = pick(ablation, "LEXICAL", "ALL");
         MetricRow vecAll = pick(ablation, "SEMANTIC", "ALL");
@@ -731,7 +950,29 @@ public final class BenchmarkReportWriter {
                 num(bestMrr.hybridAvgTop5Chars()),
                 settings.productionChunkMaxChars(), settings.productionChunkOverlapChars(),
                 defaultMatches(bestMrr),
-                num(lexAll.avgLatencyMillis()));
+                num(lexAll.avgLatencyMillis()))
+                + rerankConclusion(ablation, degraded);
+    }
+
+    /** 结论第 5 条：精排收益与代价全部取自实测；没有精排臂数据时返回空串（兼容旧跑批） */
+    private String rerankConclusion(List<MetricRow> ablation, int degraded) {
+        MetricRow base = find(ablation, "HYBRID", "ALL");
+        MetricRow fine = find(ablation, "HYBRID_RERANK", "ALL");
+        if (base == null || fine == null) {
+            return "";
+        }
+        if (degraded > 0 && degraded >= fine.queries()) {
+            return "5. 本批精排调用全部降级（" + degraded + " / " + fine.queries()
+                    + " 题回退粗排），精排臂数据不构成有效消融对比，不能据此论证 Rerank 的收益；"
+                    + "降级保护本身已验证——问答主链路在精排接口不可用时仍正常返回粗排结果。"
+                    + "请修复模型权限/限流后重跑（见 3.4 警告）。\n";
+        }
+        return "5. Rerank 精排把总体 MRR 从 " + num(base.mrr()) + " 变为 " + num(fine.mrr())
+                + "、Hit@1 从 " + pct(base.hitAt1()) + " 变为 " + pct(fine.hitAt1())
+                + "，平均耗时增量 " + num(fine.avgLatencyMillis() - base.avgLatencyMillis())
+                + " ms；本批降级 " + degraded + " / " + fine.queries()
+                + " 题，精排超时或报错时按题自动降级为粗排结果，问答主链路绝不中断。"
+                + "收益与代价应与逐题提前/退后样本一起报告（见 3.4），不能只引用均值。\n";
     }
 
     /** 结论第 1 条收尾：混合检索处在什么位置完全由实测数值决定，不占优时如实点名最优单路 */

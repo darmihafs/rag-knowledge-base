@@ -1,7 +1,9 @@
 package com.bishe.kb.service.impl;
 
+import com.bishe.kb.cache.RedisCacheService;
 import com.bishe.kb.common.BizException;
 import com.bishe.kb.config.AsyncConfig;
+import com.bishe.kb.config.KbCacheProperties;
 import com.bishe.kb.config.RagProperties;
 import com.bishe.kb.model.dto.AgentAskRequest;
 import com.bishe.kb.model.vo.AgentAskResponse;
@@ -21,6 +23,8 @@ import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -29,6 +33,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -78,14 +83,21 @@ public class AgentServiceImpl implements AgentService {
     private final Semaphore slots;
     private final Set<Long> runningUsers = ConcurrentHashMap.newKeySet();
     private final Map<String, AgentTask> tasks = new ConcurrentHashMap<>();
+    /** Redis 分布式锁入口，可为 null：关闭缓存或 Redis 不可用时退回进程内单用户闸门 */
+    private final RedisCacheService redisCache;
+    private final KbCacheProperties cacheProperties;
 
+    /** Spring 装配入口：分布式锁经 {@link ObjectProvider} 可选注入，关闭缓存时拿到 null 走本地闸门 */
+    @Autowired
     public AgentServiceImpl(ChatModel chatModel,
                             AgentKnowledgeTools tools,
                             SpaceAccessService spaceAccessService,
                             RagProperties props,
                             ObjectMapper mapper,
                             @Qualifier(AsyncConfig.AGENT_EXECUTOR) ThreadPoolTaskExecutor agentExecutor,
-                            @Qualifier(AsyncConfig.AGENT_WATCHDOG) ThreadPoolTaskScheduler agentWatchdog) {
+                            @Qualifier(AsyncConfig.AGENT_WATCHDOG) ThreadPoolTaskScheduler agentWatchdog,
+                            ObjectProvider<RedisCacheService> redisCacheProvider,
+                            KbCacheProperties cacheProperties) {
         this.chatModel = chatModel;
         this.tools = tools;
         this.spaceAccessService = spaceAccessService;
@@ -94,6 +106,23 @@ public class AgentServiceImpl implements AgentService {
         this.agentExecutor = agentExecutor;
         this.agentWatchdog = agentWatchdog;
         this.slots = new Semaphore(Math.max(1, props.getAgentThreads()));
+        this.redisCache = redisCacheProvider == null ? null : redisCacheProvider.getIfAvailable();
+        this.cacheProperties = cacheProperties;
+    }
+
+    /**
+     * 存量单测用的七参构造：不接 Redis，单用户并发完全由进程内 {@code runningUsers} 闸门控制，
+     * 行为与升级前一致（同账号拒绝、全局 4 并发、异常后释放）。
+     */
+    public AgentServiceImpl(ChatModel chatModel,
+                            AgentKnowledgeTools tools,
+                            SpaceAccessService spaceAccessService,
+                            RagProperties props,
+                            ObjectMapper mapper,
+                            ThreadPoolTaskExecutor agentExecutor,
+                            ThreadPoolTaskScheduler agentWatchdog) {
+        this(chatModel, tools, spaceAccessService, props, mapper, agentExecutor, agentWatchdog,
+                (ObjectProvider<RedisCacheService>) null, new KbCacheProperties());
     }
 
     // ---------------------------------------------------------------- 同步入口
@@ -334,7 +363,7 @@ public class AgentServiceImpl implements AgentService {
         }
         AgentTask task = new AgentTask(taskId, login, request.spaceId(), request.question(),
                 maxSteps, mock, initialScope, emitter);
-        acquire(login.id());
+        acquire(task);
         if (tasks.putIfAbsent(taskId, task) != null) {
             release(task);
             throw new BizException(4090, "任务 ID 已被占用，请重新发起");
@@ -342,7 +371,16 @@ public class AgentServiceImpl implements AgentService {
         return task;
     }
 
-    private void acquire(Long userId) {
+    /**
+     * 三层闸门：进程内单用户 Set（快速路径 + Redis 降级兜底）→ 全局信号量（默认 4 并发）
+     * → Redis 单用户分布式锁（跨实例防重入，{@code SET NX EX}，owner 为任务 ID）。
+     *
+     * <p>分布式锁返回 {@link RedisCacheService.LockResult#HELD} 说明别的实例正在跑该账号的任务，
+     * 回滚前两层闸门后拒绝；返回 {@link RedisCacheService.LockResult#UNAVAILABLE}（Redis 不可用）
+     * 则保留进程内闸门继续执行——降级只是失去跨实例防重入，不该把正常请求一并拒绝。
+     */
+    private void acquire(AgentTask task) {
+        Long userId = task.userId;
         if (!runningUsers.add(userId)) {
             throw new BizException(4290, "当前账号已有智能体任务在执行，请等待完成");
         }
@@ -350,14 +388,34 @@ public class AgentServiceImpl implements AgentService {
             runningUsers.remove(userId);
             throw new BizException(4290, "智能体任务繁忙，请稍后再试");
         }
+        if (redisCache != null) {
+            RedisCacheService.LockResult result = redisCache.tryLock(agentLockKey(userId), task.id,
+                    Duration.ofSeconds(Math.max(1L, cacheProperties.getAgentLockTtlSeconds())));
+            if (result == RedisCacheService.LockResult.HELD) {
+                slots.release();
+                runningUsers.remove(userId);
+                throw new BizException(4290, "当前账号已有智能体任务在执行，请等待完成");
+            }
+            if (result == RedisCacheService.LockResult.ACQUIRED) {
+                task.markDistributedLockHeld();
+            }
+        }
     }
 
-    /** 幂等释放：超时线程与 worker 的 finally 都可能先到。 */
+    /** 幂等释放：超时线程与 worker 的 finally 都可能先到。分布式锁用 Lua 比对 owner 后安全释放。 */
     private void release(AgentTask task) {
         if (task.releaseOnce()) {
             slots.release();
             runningUsers.remove(task.userId);
+            if (redisCache != null && task.distributedLockHeld()) {
+                redisCache.unlock(agentLockKey(task.userId), task.id);
+            }
         }
+    }
+
+    /** 单用户分布式锁 Key：{@code agent:lock:{userId}}，owner 用任务 ID 保证只释放自己的锁 */
+    private static String agentLockKey(Long userId) {
+        return "agent:lock:" + userId;
     }
 
     private Execution executeTask(AgentTask task, boolean publish) {

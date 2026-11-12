@@ -36,6 +36,8 @@ final class AgentTask {
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private final AtomicBoolean terminal = new AtomicBoolean();
     private final AtomicBoolean released = new AtomicBoolean();
+    /** 是否真正取得了 Redis 单用户分布式锁：Redis 降级时为 false，释放阶段据此决定是否走 Lua 解锁 */
+    private volatile boolean distributedLockHeld;
     private volatile AgentRunState state;
     private volatile AgentAskResponse terminalResult;
     private volatile Future<?> future;
@@ -128,6 +130,15 @@ final class AgentTask {
     /** 并发/账号闸门只释放一次：请求线程超时返回与 worker 正常结束可能同时发生。 */
     boolean releaseOnce() {
         return released.compareAndSet(false, true);
+    }
+
+    /** 标记本任务真正取得了分布式锁（owner 即任务 ID），释放时凭它做 Lua 安全解锁 */
+    void markDistributedLockHeld() {
+        this.distributedLockHeld = true;
+    }
+
+    boolean distributedLockHeld() {
+        return distributedLockHeld;
     }
 
     private void cancelWatchdog() {

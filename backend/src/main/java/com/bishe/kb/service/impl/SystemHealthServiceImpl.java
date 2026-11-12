@@ -8,6 +8,7 @@ import com.bishe.kb.model.vo.ComponentStatusVO;
 import com.bishe.kb.model.vo.ComponentStatusVO.Field;
 import com.bishe.kb.model.vo.DashboardHealthVO;
 import com.bishe.kb.service.SystemHealthService;
+import com.bishe.kb.service.VectorStoreEngine;
 import com.zaxxer.hikari.HikariDataSource;
 import com.zaxxer.hikari.HikariPoolMXBean;
 import lombok.RequiredArgsConstructor;
@@ -53,7 +54,7 @@ public class SystemHealthServiceImpl implements SystemHealthService {
 
     private final DataSource dataSource;
     private final RagProperties props;
-    private final VectorIndexService vectorIndexService;
+    private final VectorStoreEngine vectorStoreEngine;
     private final KbChunkMapper chunkMapper;
 
     @Override
@@ -133,12 +134,12 @@ public class SystemHealthServiceImpl implements SystemHealthService {
                     props.getBaseUrl(), fields,
                     "rag.embedding-enabled=false：语义检索路关闭，混合检索自动退化为纯词法");
         }
-        if (!vectorIndexService.isEnabled()) {
+        if (!vectorStoreEngine.isEnabled()) {
             fields.add(new Field("向量维度", "—"));
             return ComponentStatusVO.of("embedding", "向量化引擎（Embedding）", ComponentStatusVO.OFFLINE,
                     props.getBaseUrl(), fields, "开关已打开但向量模型 Bean 未装配，请检查密钥与启动日志");
         }
-        Integer dimension = vectorIndexService.resolveDimension();
+        Integer dimension = vectorStoreEngine.resolveDimension();
         fields.add(new Field("向量维度", dimension == null ? "探测失败" : String.valueOf(dimension)));
         if (dimension == null) {
             return ComponentStatusVO.of("embedding", "向量化引擎（Embedding）", ComponentStatusVO.OFFLINE,
@@ -150,7 +151,7 @@ public class SystemHealthServiceImpl implements SystemHealthService {
 
     /** 本地向量库持久化：把「文件里到底有多少条向量」和「库里有多少条启用切片」摆在一起比 */
     private ComponentStatusVO vectorStore() {
-        VectorIndexService.VectorStoreInfo info = vectorIndexService.inspectStore();
+        VectorStoreEngine.VectorStoreInfo info = vectorStoreEngine.inspectStore();
         long enabledChunks = chunkMapper.selectCount(new LambdaQueryWrapper<KbChunk>()
                 .eq(KbChunk::getEnabled, 1));
 

@@ -3,6 +3,8 @@ package com.bishe.kb.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
+import com.bishe.kb.cache.CacheKeys;
+import com.bishe.kb.cache.RedisCacheService;
 import com.bishe.kb.common.BizException;
 import com.bishe.kb.mapper.KbDocumentMapper;
 import com.bishe.kb.mapper.KbSpaceMapper;
@@ -19,10 +21,12 @@ import com.bishe.kb.service.KbSpaceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * 知识库空间服务实现。
@@ -40,6 +44,8 @@ public class KbSpaceServiceImpl extends ServiceImpl<KbSpaceMapper, KbSpace> impl
 
     private final KbDocumentMapper documentMapper;
     private final KbSpaceMemberMapper memberMapper;
+    /** Redis 缓存可选注入：删除空间时淘汰受影响成员的可见集合缓存，关闭时静默跳过 */
+    private final ObjectProvider<RedisCacheService> redisCacheProvider;
 
     @Override
     public Page<SpaceVO> pageSpaces(SpacePageQuery query) {
@@ -106,9 +112,18 @@ public class KbSpaceServiceImpl extends ServiceImpl<KbSpaceMapper, KbSpace> impl
         }
         // 空间和成员行必须同进同退：只删空间会留下孤儿授权，
         // 之后自增 ID 复用时可能把新空间意外授权给旧用户。
+        // 先记下受影响的成员，删完后淘汰他们的可见集合缓存，避免缓存里仍留着已删除的空间。
+        List<Long> affectedUserIds = memberMapper.selectList(new LambdaQueryWrapper<KbSpaceMember>()
+                        .select(KbSpaceMember::getUserId)
+                        .eq(KbSpaceMember::getSpaceId, id))
+                .stream().map(KbSpaceMember::getUserId).filter(Objects::nonNull).distinct().toList();
         int members = memberMapper.delete(new LambdaQueryWrapper<KbSpaceMember>()
                 .eq(KbSpaceMember::getSpaceId, id));
         removeById(id);
+        RedisCacheService redis = redisCacheProvider.getIfAvailable();
+        if (redis != null) {
+            affectedUserIds.forEach(userId -> redis.deleteAfterCommit(CacheKeys.spaces(userId)));
+        }
         log.info("删除知识库空间 id={} name={} 清理成员授权={} 条", id, space.getName(), members);
     }
 
