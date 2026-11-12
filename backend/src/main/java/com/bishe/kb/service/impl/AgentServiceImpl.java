@@ -162,13 +162,13 @@ public class AgentServiceImpl implements AgentService {
     }
 
     /**
-     * 超时 / 取消后的安全收尾：先取消 worker，再复核权限，最后抢占终态。
+     * 超时 / 取消后的安全收尾：用随任务携带的内存权限快照抢占终态，再打断 worker。
      * 若 worker 刚好先发布了完整结果，则直接返回它，不覆盖成半成品。
      */
     private AgentAskResponse finishPartial(AgentTask task, StopReason reason, String answer) {
         AgentAskResponse published = null;
         try {
-            AgentAskResponse partial = safePartial(task, task.snapshot(reason, answer));
+            AgentAskResponse partial = task.snapshot(reason, answer);
             // 先抢占终态再打断 worker：否则 worker 被中断后会先发布 CANCELLED，
             // 把「到达 90 秒预算」误报成「用户取消」。
             published = task.publish(() -> partial);
@@ -247,7 +247,7 @@ public class AgentServiceImpl implements AgentService {
         log.info("Agent 任务被用户取消 task={} userId={}", task.id, task.userId);
         AgentAskResponse published = null;
         try {
-            AgentAskResponse partial = safePartial(task, task.snapshot(StopReason.CANCELLED, CANCELLED_TEXT));
+            AgentAskResponse partial = task.snapshot(StopReason.CANCELLED, CANCELLED_TEXT);
             // 先发布取消终态，再打断 worker：避免 worker 把中断误报成 MODEL_ERROR。
             published = task.publish(() -> partial);
         } catch (BizException e) {
@@ -293,7 +293,10 @@ public class AgentServiceImpl implements AgentService {
         log.warn("Agent 流式任务达到硬超时 task={} timeout={}ms", task.id, timeoutMillis());
         AgentAskResponse published = null;
         try {
-            AgentAskResponse partial = safePartial(task, task.snapshot(StopReason.TIME_LIMIT, TIME_LIMIT_TEXT));
+            // 看门狗是单线程调度器，绝不在此阻塞查权限：直接沿用 prepare 阶段（Tomcat 请求线程）
+            // 算好、随任务携带的 initialScope 内存快照。权限撤销的兜底前移到两处——每次工具调用都在
+            // AgentKnowledgeTools 内重查成员关系；worker 正常收尾时在 executeTask 里复核最新 scope。
+            AgentAskResponse partial = task.snapshot(StopReason.TIME_LIMIT, TIME_LIMIT_TEXT);
             // 先发布超时终态再打断 worker，保证停止原因不被中断后的 CANCELLED 抢先覆盖。
             published = task.publish(() -> partial);
         } catch (BizException e) {
@@ -450,20 +453,6 @@ public class AgentServiceImpl implements AgentService {
         }
     }
 
-    private AgentAskResponse safePartial(AgentTask task, AgentAskResponse partial) {
-        // 超时/取消线程没有拦截器写入的 ThreadLocal，必须显式带上原用户再复核空间权限。
-        UserContext.set(task.login);
-        try {
-            RetrievalScope latest = spaceAccessService.scopeForCurrentUser(task.spaceId);
-            if (!sameScope(task.initialScope, latest)) {
-                throw new BizException(4030, "任务执行期间空间权限已改变，请重新提问");
-            }
-            return partial;
-        } finally {
-            UserContext.clear();
-        }
-    }
-
     // ---------------------------------------------------------------- 模型 / 工具循环
 
     private AgentAskResponse run(AgentTask task, AgentRunState state) {
@@ -489,7 +478,7 @@ public class AgentServiceImpl implements AgentService {
                 if (state.cancelled()) {
                     return stopped(state, StopReason.CANCELLED);
                 }
-                log.warn("Agent 模型调用失败 exception={}", e.getClass().getSimpleName());
+                log.warn("Agent 模型调用失败 exception={}", e.getClass().getSimpleName(), e);
                 return stopped(state, StopReason.MODEL_ERROR);
             }
             if (state.cancelled()) {

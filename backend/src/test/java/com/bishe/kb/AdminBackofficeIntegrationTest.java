@@ -257,13 +257,14 @@ class AdminBackofficeIntegrationTest {
     }
 
     @Test
-    @DisplayName("PUT /api/users/{id}/reset-password：重置为 123456 且旧密码立刻不可用")
+    @DisplayName("PUT /api/users/{id}/reset-password：重置为初始密码（响应脱敏）且旧密码立刻不可用")
     void resetPasswordShouldApplyImmediately() throws Exception {
         okData(admin(postJson("/api/users", Map.of("username", "forget_me", "password", "old12345"))));
         long id = jdbcTemplate.queryForObject("select id from sys_user where username = 'forget_me'", Long.class);
 
         JsonNode data = okData(admin(put("/api/users/" + id + "/reset-password")));
-        assertThat(data.asText()).isEqualTo("123456");
+        // 响应只回脱敏提示，不再明文回传初始密码；重置效果由下面「新密码可登录、旧密码 4001」证明
+        assertThat(data.asText()).contains("已重置为系统初始密码").doesNotContain("123456");
 
         assertThat(login("forget_me", "123456")).isNotBlank();
         assertThat(perform(postJson("/api/auth/login", Map.of("username", "forget_me", "password", "old12345")))

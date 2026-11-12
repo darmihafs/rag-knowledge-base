@@ -32,10 +32,12 @@ public class KbCacheProperties {
     private long authTtlHours = 2;
 
     /**
-     * Agent 单用户分布式锁的过期时间，默认 90 秒，与 {@code rag.agent-timeout-millis} 对齐。
-     * 持有者崩溃 / 释放失败时，锁到点自动过期，不会把账号永久锁死。
+     * Agent 单用户分布式锁的过期时间，默认 120 秒。
+     * 刻意大于 {@code rag.agent-timeout-millis}（默认 90 秒）的任务硬预算并留出 30 秒余量：
+     * 锁必须比任务活得久，否则任务还在跑、锁却先过期，别的实例会趁虚取得同一账号的锁，
+     * 单用户防重入形同虚设。持有者崩溃 / 释放失败时，锁到点自动过期，不会把账号永久锁死。
      */
-    private long agentLockTtlSeconds = 90;
+    private long agentLockTtlSeconds = 120;
 
     /**
      * 探测到 Redis 不可用后的降级背避窗口（毫秒）。窗口内的操作直接返回降级结果，

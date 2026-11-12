@@ -152,6 +152,28 @@ public class RedisCacheService {
         }
     }
 
+    /**
+     * 原子自增计数，并在首次创建时设置过期（{@code INCR} + 仅当返回 1 时 {@code EXPIRE}），
+     * 用于登录防爆破这类「固定窗口计数」。窗口从首次失败起算，不随后续失败滑动。
+     *
+     * @return 自增后的计数；Redis 不可用时返回 null，调用方据此退回本地计数兜底
+     */
+    public Long increment(String key, Duration ttl) {
+        if (!available()) {
+            return null;
+        }
+        try {
+            Long value = redis.opsForValue().increment(key);
+            if (value != null && value == 1L) {
+                redis.expire(key, ttl);
+            }
+            return value;
+        } catch (RuntimeException e) {
+            markUnavailable(e);
+            return null;
+        }
+    }
+
     private boolean available() {
         return System.currentTimeMillis() >= retryAfterEpochMillis;
     }

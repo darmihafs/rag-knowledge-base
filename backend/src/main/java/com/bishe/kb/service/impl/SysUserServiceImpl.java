@@ -11,6 +11,8 @@ import com.bishe.kb.model.dto.RegisterRequest;
 import com.bishe.kb.model.entity.SysUser;
 import com.bishe.kb.service.SpaceAccessService;
 import com.bishe.kb.service.SysUserService;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -19,6 +21,9 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 用户服务实现。
@@ -33,10 +38,25 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> implements SysUserService {
 
+    /** 同一账号连续密码错误达此上限后，在窗口内直接拒绝登录（不再消耗 BCrypt 算力） */
+    private static final int MAX_LOGIN_FAILURES = 10;
+    /** 防爆破固定窗口：从首次失败起算 15 分钟，到点计数自动过期 */
+    private static final Duration LOGIN_LOCK_WINDOW = Duration.ofMinutes(15);
+
     private final PasswordEncoder passwordEncoder;
     private final SpaceAccessService spaceAccessService;
     /** Redis 缓存可选注入：关闭时拿到 null，吊销只走数据库版本号自增（与升级前一致） */
     private final ObjectProvider<RedisCacheService> redisCacheProvider;
+
+    /**
+     * 登录失败计数的本地兜底（Redis 关闭或不可用时使用）。写后 15 分钟过期、容量上限防内存膨胀。
+     * 带初始化器的 final 字段不会被 Lombok {@code @RequiredArgsConstructor} 纳入构造参数，
+     * 因此装配签名与升级前完全一致，现有测试无需改动。
+     */
+    private final Cache<String, AtomicInteger> localLoginFailures = Caffeine.newBuilder()
+            .expireAfterWrite(LOGIN_LOCK_WINDOW)
+            .maximumSize(10_000)
+            .build();
 
     @Override
     public SysUser findByUsername(String username) {
@@ -50,14 +70,65 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
 
     @Override
     public SysUser authenticate(String username, String rawPassword) {
+        String failureKey = StringUtils.lowerCase(StringUtils.trimToEmpty(username));
+        // 先过防爆破闸门：连续失败达上限的账号在窗口内直接拒绝，连 BCrypt 都不再跑，
+        // 既挡暴力穷举，也避免攻击者用「响应耗时差」枚举账号是否存在。
+        if (loginFailureCount(failureKey) >= MAX_LOGIN_FAILURES) {
+            throw new BizException(4290, "密码错误次数过多，账号已被临时锁定，请 15 分钟后再试");
+        }
         SysUser user = findByUsername(username);
         if (user == null || !passwordEncoder.matches(rawPassword, user.getPassword())) {
+            recordLoginFailure(failureKey);
             throw new BizException(4001, "用户名或密码错误");
         }
         if (!user.isEnabled()) {
             throw new BizException(4003, "账号已被禁用，请联系管理员");
         }
+        // 登录成功清除计数：本人偶尔输错不该被之前的失败累计锁死
+        clearLoginFailures(failureKey);
         return user;
+    }
+
+    /**
+     * 读取连续失败计数：Redis 可用时以跨实例的全局计数为准，同时取本地兜底的较大值，
+     * 保证 Redis 中途降级时本地已累计的失败不会凭空清零。两者都拿不到则视为 0。
+     */
+    private long loginFailureCount(String failureKey) {
+        long redisCount = 0L;
+        RedisCacheService redis = redisCacheProvider.getIfAvailable();
+        if (redis != null) {
+            String value = redis.get(CacheKeys.loginFailures(failureKey));
+            if (value != null) {
+                try {
+                    redisCount = Long.parseLong(value);
+                } catch (NumberFormatException ignored) {
+                    // 计数被外部写脏：当作 0，不影响正常登录
+                }
+            }
+        }
+        AtomicInteger local = localLoginFailures.getIfPresent(failureKey);
+        return Math.max(redisCount, local == null ? 0L : local.get());
+    }
+
+    /** 记一次失败：优先写 Redis（跨实例共享），Redis 关闭或降级时退回本地 Caffeine 计数 */
+    private void recordLoginFailure(String failureKey) {
+        RedisCacheService redis = redisCacheProvider.getIfAvailable();
+        if (redis != null) {
+            Long value = redis.increment(CacheKeys.loginFailures(failureKey), LOGIN_LOCK_WINDOW);
+            if (value != null) {
+                return;
+            }
+        }
+        localLoginFailures.get(failureKey, key -> new AtomicInteger()).incrementAndGet();
+    }
+
+    /** 登录成功后清除计数：Redis 与本地兜底一起清，避免残留计数把本人下次登录误锁 */
+    private void clearLoginFailures(String failureKey) {
+        RedisCacheService redis = redisCacheProvider.getIfAvailable();
+        if (redis != null) {
+            redis.delete(CacheKeys.loginFailures(failureKey));
+        }
+        localLoginFailures.invalidate(failureKey);
     }
 
     /**

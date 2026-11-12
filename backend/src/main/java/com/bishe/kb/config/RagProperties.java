@@ -108,7 +108,7 @@ public class RagProperties {
 
     /**
      * 问题向量一级缓存（Caffeine L1）的条数上限。同一个模型对同一句问题的向量是确定性的，
-     * 所以这里没有新鲜度问题，只有内存问题：1536 维一条约 6KB，1000 条约 6MB。
+     * 所以这里没有新鲜度问题，只有内存问题：1024 维（text-embedding-v3 实测）一条约 4KB，1000 条约 4MB。
      * 设 0 即关闭缓存。二级缓存（Redis L2）见 {@link #embeddingL2TtlHours}。
      */
     private int embeddingQueryCacheSize = 1000;

@@ -140,8 +140,9 @@ kb:
     enabled: ${KB_CACHE_ENABLED:true}
     # 鉴权缓存（auth:token_ver:{userId} / auth:spaces:{userId}）存活时间，默认 2 小时
     auth-ttl-hours: ${KB_CACHE_AUTH_TTL_HOURS:2}
-    # Agent 单用户分布式锁过期秒数，与 rag.agent-timeout-millis 对齐；持有者崩溃时到点自动释放
-    agent-lock-ttl-seconds: ${KB_CACHE_AGENT_LOCK_TTL_SECONDS:90}
+    # Agent 单用户分布式锁过期秒数：刻意大于 rag.agent-timeout-millis（90s）任务预算 + 30s 余量，
+    # 保证锁比任务活得久，避免任务还在跑锁先过期被别的实例趁虚取得；持有者崩溃时到点自动释放
+    agent-lock-ttl-seconds: ${KB_CACHE_AGENT_LOCK_TTL_SECONDS:120}
     # 探测到 Redis 不可用后的降级背避窗口（毫秒），窗口内不再发起注定失败的连接
     unavailable-backoff-millis: ${KB_CACHE_UNAVAILABLE_BACKOFF_MILLIS:10000}
 

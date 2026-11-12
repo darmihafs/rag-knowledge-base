@@ -49,8 +49,10 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class UserAdminServiceImpl implements UserAdminService {
 
-    /** 管理员重置密码后的初始密码，用户可自行修改 */
+    /** 管理员重置密码后的初始密码，用户可自行修改；仅用于内部 BCrypt 加密，绝不出现在响应体里 */
     private static final String DEFAULT_PASSWORD = "123456";
+    /** 重置密码接口对外只回脱敏提示：固定初始密码不再明文回传，避免被日志 / 抓包 / 浏览器历史留存 */
+    private static final String RESET_PASSWORD_HINT = "密码已重置为系统初始密码，请通过安全渠道告知本人并督促尽快修改";
 
     private final SysUserService userService;
     private final SpaceAccessService spaceAccessService;
@@ -158,7 +160,8 @@ public class UserAdminServiceImpl implements UserAdminService {
         // 被重置说明账号可能已失控：连同此前签发的 token 一起吊销，逼对方用新密码重新登录
         userService.invalidateTokens(user.getId());
         log.info("管理员重置密码 id={} username={}，已重置为系统初始密码并吊销旧 token", userId, user.getUsername());
-        return DEFAULT_PASSWORD;
+        // 只回脱敏提示，不再明文回传固定初始密码（前端用自带的 INITIAL_PASSWORD 常量展示）
+        return RESET_PASSWORD_HINT;
     }
 
     // ------------------------------------------------------------------ 内部工具

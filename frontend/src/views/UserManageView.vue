@@ -163,8 +163,9 @@ async function onResetPassword(row: AdminUserVO) {
     return
   }
   try {
-    const password = await resetUserPassword(row.id)
-    ElMessage.success(`已重置为 ${password}，请提醒本人尽快修改`)
+    // 后端不再明文回传初始密码，这里用前端自带的 INITIAL_PASSWORD 常量展示，UX 与升级前一致
+    await resetUserPassword(row.id)
+    ElMessage.success(`已重置为 ${INITIAL_PASSWORD}，请提醒本人尽快修改`)
   } catch {
     /* 拦截器已提示 */
   }

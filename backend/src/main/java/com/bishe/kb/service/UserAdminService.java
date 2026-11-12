@@ -29,8 +29,8 @@ public interface UserAdminService {
     AdminUserVO updateStatus(Long userId, Integer status, LoginUser operator);
 
     /**
-     * 重置密码为系统默认初始密码，返回该明文密码供管理员转告本人。
-     * 用户登录后可自行改密，系统不存任何可逆密码。
+     * 重置密码为系统默认初始密码，并吊销该账号既有令牌。
+     * 响应只回脱敏提示，不再明文回传固定初始密码；用户登录后可自行改密，系统不存任何可逆密码。
      */
     String resetPassword(Long userId);
 }

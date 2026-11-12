@@ -54,7 +54,7 @@ public class AgentKnowledgeTools {
             return error(e.getMessage());
         } catch (RuntimeException e) {
             // 不把数据库异常、路径、供应商响应等原始细节送回模型或浏览器。
-            log.warn("Agent 工具执行失败 tool={} exception={}", call.name(), e.getClass().getSimpleName());
+            log.warn("Agent 工具执行失败 tool={} exception={}", call.name(), e.getClass().getSimpleName(), e);
             return error("工具执行失败，请调整参数或稍后重试");
         }
     }

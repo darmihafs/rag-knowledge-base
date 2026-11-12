@@ -1,5 +1,5 @@
 # ============================================================================
-# 一键起全栈：MySQL 8 + Spring Boot 后端 + nginx 前端
+# 一键起全栈：MySQL 8 + Redis 7 + Spring Boot 后端 + nginx 前端
 #   1) cp .env.example .env       # 填 MySQL 密码、JWT 密钥、DashScope api-key
 #   2) docker compose up -d --build
 #   3) 浏览器打开 http://localhost:5080，admin / admin123
@@ -7,6 +7,8 @@
 # 说明：
 #   * 首次启动（kb-mysql-data 卷为空）会自动执行 backend/src/main/resources/db/schema.sql
 #     建库建表并写入种子账号；卷已存在时 initdb 不再执行，老库升级要手工跑 db/migration/V*.sql。
+#   * Redis 仅作缓存 / 分布式锁 / 登录防爆破计数，丢失可优雅降级；刻意不映射宿主 6379，
+#     避免与本机已装的 Redis 服务抢端口，只在 compose 内网暴露给后端。
 #   * 本机没装 Docker，这份 compose 与两个 Dockerfile 是按官方镜像约定写的，
 #     尚未在真实 Docker 里跑通过（见 README「未验证项」）。
 # ============================================================================
@@ -41,6 +43,24 @@ services:
       retries: 10
       start_period: 40s
 
+  redis:
+    image: redis:7-alpine
+    container_name: kb-redis
+    restart: unless-stopped
+    # 开 appendonly 让 L2 向量缓存与计数重启后仍在；即便丢数据，后端也会优雅降级为本地路径
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - kb-redis-data:/data
+    # 刻意不映射宿主 6379：本机 Windows Redis 服务已占用该端口，只在 compose 内网暴露给后端
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
   backend:
     build:
       context: ./backend
@@ -49,6 +69,8 @@ services:
     restart: unless-stopped
     depends_on:
       mysql:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     environment:
       MYSQL_HOST: mysql
@@ -72,6 +94,15 @@ services:
       # 语义路：问题向量化超时秒数、问题向量缓存条数（0 = 关闭缓存）
       RAG_EMBEDDING_TIMEOUT_SECONDS: ${RAG_EMBEDDING_TIMEOUT_SECONDS:-20}
       RAG_EMBEDDING_QUERY_CACHE_SIZE: ${RAG_EMBEDDING_QUERY_CACHE_SIZE:-512}
+      # Redis（Query 向量 L2 / 鉴权与空间集合缓存 / Agent 分布式锁 / 登录防爆破计数）
+      # 指向 compose 内网的 redis 服务；KB_CACHE_ENABLED=false 可整体降级为本地路径
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      KB_CACHE_ENABLED: ${KB_CACHE_ENABLED:-true}
+      # Agent 单用户锁 TTL：大于任务硬预算 90s + 30s 余量，保证锁比任务活得久
+      KB_CACHE_AGENT_LOCK_TTL_SECONDS: ${KB_CACHE_AGENT_LOCK_TTL_SECONDS:-120}
       TZ: Asia/Shanghai
     volumes:
       # 上传原文与向量库持久化文件必须出容器，否则重建容器就全丢了
@@ -93,5 +124,6 @@ services:
 
 volumes:
   kb-mysql-data:
+  kb-redis-data:
   kb-uploads:
   kb-embeddings:

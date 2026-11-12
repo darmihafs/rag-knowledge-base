@@ -112,6 +112,22 @@ class RedisCacheServiceTest {
     }
 
     @Test
+    @DisplayName("自增计数：首次创建时设置过期，后续自增不重复设置；异常降级返回 null")
+    void incrementSetsTtlOnFirstAndDegrades() {
+        when(valueOps.increment("cnt")).thenReturn(1L);
+        assertThat(service.increment("cnt", Duration.ofMinutes(15))).isEqualTo(1L);
+        verify(redis).expire("cnt", Duration.ofMinutes(15));
+
+        when(valueOps.increment("cnt")).thenReturn(2L);
+        assertThat(service.increment("cnt", Duration.ofMinutes(15))).isEqualTo(2L);
+        // 仅首次（返回 1）设置过期，第二次不再重复 expire
+        verify(redis, times(1)).expire("cnt", Duration.ofMinutes(15));
+
+        when(valueOps.increment("down")).thenThrow(new RuntimeException("down"));
+        assertThat(service.increment("down", Duration.ofMinutes(15))).isNull();
+    }
+
+    @Test
     @DisplayName("背避窗口过后自动恢复尝试连接")
     void recoversAfterBackoff() {
         KbCacheProperties props = new KbCacheProperties();

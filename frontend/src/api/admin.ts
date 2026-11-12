@@ -55,7 +55,7 @@ export const updateUserRole = (id: number, role: UserRole) =>
 export const updateUserStatus = (id: number, status: number) =>
   api.put<AdminUserVO>(`/users/${id}/status`, { status })
 
-/** PUT /api/users/{id}/reset-password —— 重置为系统初始密码，返回该明文密码 */
+/** PUT /api/users/{id}/reset-password —— 重置为系统初始密码，响应只回脱敏提示（不再明文回传密码） */
 export const resetUserPassword = (id: number) => api.put<string>(`/users/${id}/reset-password`)
 
 // ---------------------------------------------------------------------- 问答审计日志

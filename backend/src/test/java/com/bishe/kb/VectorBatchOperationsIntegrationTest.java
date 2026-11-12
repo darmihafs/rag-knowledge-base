@@ -22,6 +22,7 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -165,6 +166,32 @@ class VectorBatchOperationsIntegrationTest {
         assertThat(memoryStoreSize()).isEqualTo(2);
         assertThat(snapshotEntries()).isEqualTo(2);
         assertThat(vectorIndexService.searchChunkIds(QUESTION, 5)).containsExactlyInAnyOrder(CHUNK_A, CHUNK_C);
+    }
+
+    @Test
+    @DisplayName("分批向量化中途某批失败：已写入内存的前序批次仍原子落盘，内存与磁盘不分叉")
+    void partialBatchFailureStillPersistsWrittenBatches() {
+        // 批大小设为 1：3 条分段分 3 批，令第 2 批远程向量化抛异常，第 1 批已写进内存
+        props.setEmbeddingBatchSize(1);
+        try {
+            AtomicInteger calls = new AtomicInteger();
+            Mockito.when(embeddingModel.embedAll(Mockito.anyList())).thenAnswer(invocation -> {
+                if (calls.incrementAndGet() == 2) {
+                    throw new IllegalStateException("第二批远程向量化失败");
+                }
+                List<TextSegment> segments = invocation.getArgument(0);
+                return Response.from(segments.stream().map(s -> Embedding.from(TARGET_VECTOR)).toList());
+            });
+
+            int written = vectorIndexService.indexChunks(chunks(CHUNK_A, CHUNK_B, CHUNK_C));
+
+            // 第 1 批成功写入并落盘，第 2 批失败后循环中断：返回 1，磁盘与内存都必须恰好 1 条
+            assertThat(written).isEqualTo(1);
+            assertThat(snapshotEntries()).isEqualTo(1);
+            assertThat(memoryStoreSize()).isEqualTo(1);
+        } finally {
+            props.setEmbeddingBatchSize(10);
+        }
     }
 
     // ------------------------------------------------------------------ 辅助方法

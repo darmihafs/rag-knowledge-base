@@ -67,7 +67,7 @@ public class UserController {
         return Result.ok(userAdminService.updateStatus(id, request.status(), UserContext.require()));
     }
 
-    /** 返回重置后的明文初始密码，供管理员转告本人；库裡仍然只存 BCrypt 密文 */
+    /** 只回脱敏提示（不再明文回传初始密码）；库裡仍然只存 BCrypt 密文，重置同时吊销旧 token */
     @PutMapping("/{id}/reset-password")
     public Result<String> resetPassword(@PathVariable Long id) {
         LoginUser operator = UserContext.require();

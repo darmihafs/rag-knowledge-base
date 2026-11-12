@@ -242,7 +242,8 @@ class SecurityHardeningIntegrationTest {
         long userId = jdbcTemplate.queryForObject(
                 "select id from sys_user where username = 'revoke_reset_01'", Long.class);
 
-        assertThat(okData(admin(put("/api/users/" + userId + "/reset-password"))).asText()).isEqualTo("123456");
+        assertThat(okData(admin(put("/api/users/" + userId + "/reset-password"))).asText())
+                .contains("已重置为系统初始密码").doesNotContain("123456");
 
         mockMvc.perform(withToken(get("/api/auth/me"), victim))
                 .andExpect(status().isUnauthorized());

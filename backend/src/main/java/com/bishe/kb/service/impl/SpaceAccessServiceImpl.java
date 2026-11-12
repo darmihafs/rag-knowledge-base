@@ -190,6 +190,7 @@ public class SpaceAccessServiceImpl implements SpaceAccessService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public int revoke(Long spaceId, List<Long> userIds) {
         KbSpace space = requireExistingSpace(spaceId);
         List<Long> distinct = distinctUserIds(userIds);

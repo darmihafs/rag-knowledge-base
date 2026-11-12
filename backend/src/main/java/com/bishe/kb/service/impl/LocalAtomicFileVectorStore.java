@@ -273,13 +273,17 @@ public class LocalAtomicFileVectorStore implements VectorStoreEngine {
                 embeddingStore.addAll(ids, embeddings, segments);
                 written += slice.size();
             }
-            if (written > 0) {
-                persist();
-            }
             log.info("向量化写入完成: {} 条分段", written);
         } catch (RuntimeException e) {
             // 向量化失败不影响文档已入库的事实，仅记录，问答侧会自动退化为词法检索
-            log.warn("向量化写入失败，文档仍可按词法检索（{} 条已写入）: {}", written, e.getMessage());
+            log.warn("向量化写入失败，文档仍可按词法检索（{} 条已写入）", written, e);
+        } finally {
+            // 关键：无论中途哪一批抛异常，只要已有批次写进内存就原子落盘一次。
+            // 否则「内存有前 N-1 批、磁盘还是旧状态」会分叉——重启后语义召回静默丢掉这些分段。
+            // persist() 自身吞掉 I/O 异常并告警，绝不会从这里外抛覆盖原始失败原因。
+            if (written > 0) {
+                persist();
+            }
         }
         return written;
     }

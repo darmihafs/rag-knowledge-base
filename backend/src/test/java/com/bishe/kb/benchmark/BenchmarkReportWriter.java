@@ -227,7 +227,8 @@ public final class BenchmarkReportWriter {
         md.append("## 3 实验一：检索策略消融实验\n\n");
         md.append("统一取 Top-" + evalWindow + " 候选，Hit@K 按前 1/3/5 名截断，MRR 在 Top-" + evalWindow
                 + " 窗口内取首个命中名次的倒数"
-                + "（窗口内未命中记 0）。耗时为单次召回端到端时间，语义路与混合路包含一次问题向量化网络请求。"
+                + "（窗口内未命中记 0）。耗时为单次召回端到端时间；语义路含一次问题向量化公网调用，"
+                + "混合路的问题向量化在本跑批中命中前序语义臂写入的 Caffeine L1 / Redis L2 缓存（详见 3.2 耗时分析），故不含公网调用。"
                 + "基线三策略均在关闭 Rerank 精排下运行；另设「RRF 粗排 + 精排」生产流水线附加臂，"
                 + "top-n 设为评测窗口保证同窗口可比（见 3.4）。\n\n");
         md.append("### 3.1 总体指标\n\n");
@@ -468,9 +469,15 @@ public final class BenchmarkReportWriter {
                 .append(num(vecAll.avgLatencyMillis())).append(" ms（P95 ").append(num(vecAll.p95LatencyMillis()))
                 .append(" ms）、混合路 ").append(num(hybAll.avgLatencyMillis())).append(" ms（P95 ")
                 .append(num(hybAll.p95LatencyMillis())).append(" ms）。")
-                .append("混合路并不比语义路多一次远程调用：两路各自只对问题做一次向量化，")
-                .append("增量 ").append(num(hybAll.avgLatencyMillis() - vecAll.avgLatencyMillis()))
-                .append(" ms 来自两组候选的回表与 RRF 排序，相对生成阶段动辄数秒的端到端耗时可以忽略；")
+                .append("混合路比语义路快一个数量级，不是因为它排序更省，而是因为它命中了问题向量缓存：")
+                .append("评测按 LEXICAL → SEMANTIC → HYBRID 的顺序跑臂，语义臂先对全部问题各做一次公网向量化")
+                .append("（冷调用，计入语义路耗时），并把问题向量写进 Caffeine L1 / Redis L2；")
+                .append("紧随其后的混合臂在 L1 的写后过期窗口内复用同一批向量，向量化变成纯内存命中、不再走公网，")
+                .append("于是只剩下两组候选的回表与 RRF 排序这点本地开销。")
+                .append("换句话说，混合臂的低耗时是「多级缓存在高频检索下的加速效果」叠加「臂间执行顺序」的产物，")
+                .append("而非 RRF 比单路语义召回更便宜——RRF 实际上比单路多做了候选合并与重排。")
+                .append("若在生产里对一条全新问题做单次冷检索，混合路同样要付一次向量化公网调用，")
+                .append("耗时会在语义路的基础上再叠加候选回表与 RRF，而不是更低。")
                 .append("词法路虽快，但它单独承担召回时的质量损失（见上）远不是这点耗时能补偿的。\n\n");
         return sb.toString();
     }
