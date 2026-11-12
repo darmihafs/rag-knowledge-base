@@ -10,6 +10,7 @@ import org.springframework.data.redis.core.script.RedisScript;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -128,22 +129,25 @@ class RedisCacheServiceTest {
     }
 
     @Test
-    @DisplayName("背避窗口过后自动恢复尝试连接")
+    @DisplayName("背避窗口过后自动恢复尝试连接（注入可控时钟，确定性、不依赖真实时间）")
     void recoversAfterBackoff() {
+        // 退避被 Math.max(1000, ...) 钳到最小 1000ms：旧写法用真实时间轮询、上限又≈1000ms，
+        // 慢速 CI runner 上「恢复时刻≈轮询截止」边界赛跑会偶发读到 null。改注入可控时钟手动拨过窗口。
+        AtomicLong clock = new AtomicLong(1_000_000L);
         KbCacheProperties props = new KbCacheProperties();
-        props.setUnavailableBackoffMillis(1);
-        RedisCacheService shortBackoff = new RedisCacheService(redis, props);
+        props.setUnavailableBackoffMillis(1); // 生效值被钳到 1000ms
+        RedisCacheService shortBackoff = new RedisCacheService(redis, props, clock::get);
         when(valueOps.get("k")).thenThrow(new RuntimeException("down")).thenReturn("recovered");
+
+        // 首次读触发降级：背避截止 = clock + 1000
         assertThat(shortBackoff.get("k")).isNull();
-        // 等待背避窗口（1ms）过去后重试，读到恢复后的值
-        long deadline = System.currentTimeMillis() + 1000;
-        String result = null;
-        while (System.currentTimeMillis() < deadline) {
-            result = shortBackoff.get("k");
-            if (result != null) {
-                break;
-            }
-        }
-        assertThat(result).isEqualTo("recovered");
+        // 窗口内再读仍降级，且不再触达 Redis（只消费了第一次 thenThrow）
+        assertThat(shortBackoff.get("k")).isNull();
+        verify(valueOps, times(1)).get("k");
+
+        // 把时钟拨过背避窗口（+1000 再 +1）：下一次读应真正触达 Redis 并拿到恢复值
+        clock.addAndGet(1_001L);
+        assertThat(shortBackoff.get("k")).isEqualTo("recovered");
+        verify(valueOps, times(2)).get("k");
     }
 }

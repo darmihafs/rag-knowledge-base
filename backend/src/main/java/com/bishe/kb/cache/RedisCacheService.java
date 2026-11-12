@@ -2,6 +2,7 @@ package com.bishe.kb.cache;
 
 import com.bishe.kb.config.KbCacheProperties;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -11,6 +12,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Duration;
 import java.util.List;
+import java.util.function.LongSupplier;
 
 /**
  * Redis 缓存 / 分布式锁的统一入口，把「连得上就用、连不上就降级」收口在一个地方。
@@ -50,13 +52,26 @@ public class RedisCacheService {
     private final StringRedisTemplate redis;
     private final long backoffMillis;
     private final DefaultRedisScript<Long> releaseScript;
+    /** 时间源：生产为系统时钟，测试可注入可控时钟以确定性验证背避恢复 */
+    private final LongSupplier clock;
 
     /** 背避截止时间戳：在此之前所有操作直接降级，不再尝试连接 */
     private volatile long retryAfterEpochMillis = 0L;
 
+    @Autowired
     public RedisCacheService(StringRedisTemplate redis, KbCacheProperties props) {
+        this(redis, props, System::currentTimeMillis);
+    }
+
+    /**
+     * 测试专用构造器：注入可控时钟，让「背避窗口过后恢复」用例手动拨过窗口，
+     * 不依赖真实时间流逝——避免慢速 CI runner 上「恢复时刻≈轮询截止」的边界赛跑偶发失败。
+     * 生产装配走上面带 {@link Autowired} 的系统时钟构造器，行为与升级前完全一致。
+     */
+    RedisCacheService(StringRedisTemplate redis, KbCacheProperties props, LongSupplier clock) {
         this.redis = redis;
         this.backoffMillis = Math.max(1_000L, props.getUnavailableBackoffMillis());
+        this.clock = clock;
         this.releaseScript = new DefaultRedisScript<>(RELEASE_LUA, Long.class);
     }
 
@@ -175,11 +190,11 @@ public class RedisCacheService {
     }
 
     private boolean available() {
-        return System.currentTimeMillis() >= retryAfterEpochMillis;
+        return clock.getAsLong() >= retryAfterEpochMillis;
     }
 
     private void markUnavailable(RuntimeException e) {
-        retryAfterEpochMillis = System.currentTimeMillis() + backoffMillis;
+        retryAfterEpochMillis = clock.getAsLong() + backoffMillis;
         log.warn("Redis 不可用，{}ms 内降级为本地路径: {}", backoffMillis, e.getMessage());
     }
 }
