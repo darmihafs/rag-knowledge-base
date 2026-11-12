@@ -137,7 +137,8 @@ class RetrievalBenchmarkTest {
         EmbeddingModel benchmarkEmbeddingModel(RagProperties props) {
             String apiKey = BenchmarkSecrets.resolveApiKey();
             return OpenAiEmbeddingModel.builder()
-                    .apiKey(apiKey.isBlank() ? "sk-benchmark-key-not-configured" : apiKey)
+                    // 占位值不带 sk- 前缀：CI 密钥体检对 sk- 字面量零容忍，占位串也不能撞正则
+                    .apiKey(apiKey.isBlank() ? "benchmark-key-not-configured" : apiKey)
                     .baseUrl(props.getBaseUrl())
                     .modelName(props.getEmbeddingModel())
                     .timeout(Duration.ofSeconds(60))
